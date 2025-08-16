@@ -31,6 +31,14 @@ import Avatar from "./components/Avatar";
 import { btnBase, cardBase, chipBase, cx, TextInput, ChipsInput, ToggleRow } from "./components/UI";
 import logo from "./assets/logo.png";
 import { fetchEvents, type EventUI } from "./services/events/service";
+import {
+  fetchMatchCandidates,
+  fetchMyConnectionIndex,
+  sendConnectionRequest,
+  type MatchCandidate,
+  type ConnState,
+} from "./services/matchmaking/services";
+
 
 export async function sendTestMessage(groupId: string) {
   const { data: s } = await supabase.auth.getSession();
@@ -41,9 +49,9 @@ export async function sendTestMessage(groupId: string) {
   }
 
   const { error } = await supabase.from("messages").insert({
-    group_id: groupId,   // <- replace with a real group id
+    conversationId: groupId,   // <- replace with a real group id
     sender_id: myId,     // must match your logged-in user
-    message: "Hello from the app!"
+    text: "Hello from the app!"
   });
 
   if (error) console.error(error);
@@ -437,6 +445,38 @@ async function decorateConversations(convs: any[]) {
   });
 }
 
+type ConnectionProfile = { user_id: string; email: string | null; full_name?: string | null };
+
+async function listMyConnections(): Promise<ConnectionProfile[]> {
+  const me = await getMyUserId();
+  if (!me) return [];
+
+  const { data: rows, error } = await supabase
+    .from("connections")
+    .select("user_id, connection_id")
+    .or(`user_id.eq.${me},connection_id.eq.${me}`);
+  if (error || !rows) return [];
+
+  const otherIds = new Set<string>();
+  rows.forEach((r: any) => {
+    if (r.user_id === me) otherIds.add(r.connection_id);
+    else if (r.connection_id === me) otherIds.add(r.user_id);
+  });
+  if (otherIds.size === 0) return [];
+
+  const { data: profiles } = await supabase
+    .from("user_directory")
+    .select("user_id, email, full_name")
+    .in("user_id", Array.from(otherIds));
+
+  return (profiles || []).map(p => ({
+    user_id: p.user_id,
+    email: p.email ?? null,
+    full_name: (p as any).full_name ?? null, // optional column
+  }));
+}
+
+
 
 
 async function getMyUserId(): Promise<string | null> {
@@ -569,15 +609,20 @@ async function listMessages(conversationId: string) {
 }
 
 // Send a message to the selected conversation
-async function sendMessage(conversationId: string, text: string) {
+async function sendMessage(conversationId: string, text: string, eventId?: string) {
   const me = await getMyUserId();
-  if (!me || !text.trim()) return;
+  if (!me) return;
+  if (!text.trim() && !eventId) return; // nothing to send
+
   await supabase.from("messages").insert({
     conversation_id: conversationId,
     sender_id: me,
-    text: text.trim(),
+    text: text.trim() || null,
+    event_id: eventId || null,
   });
 }
+
+
 
 // Realtime: only new messages for this conversation
 function subscribeToConversation(conversationId: string, onNew: (row: any) => void) {
@@ -591,6 +636,70 @@ function subscribeToConversation(conversationId: string, onNew: (row: any) => vo
     .subscribe();
   return () => supabase.removeChannel(channel);
 }
+
+async function openOrCreateDMByUserId(otherUserId: string): Promise<string | null> {
+  const me = await getMyUserId();
+  if (!me) return null;
+
+  // Find overlap of conversations we both belong to
+  const { data: myMems } = await supabase
+    .from("conversation_members")
+    .select("conversation_id")
+    .eq("user_id", me);
+
+  const myIds = (myMems || []).map(m => m.conversation_id);
+  if (myIds.length) {
+    const { data: overlap } = await supabase
+      .from("conversation_members")
+      .select("conversation_id")
+      .eq("user_id", otherUserId)
+      .in("conversation_id", myIds)
+      .limit(1);
+    if (overlap?.length) return overlap[0].conversation_id as string;
+  }
+
+  // Create a new DM and add both members
+  const { data: c } = await supabase
+    .from("conversations")
+    .insert({ is_dm: true })
+    .select("id")
+    .single();
+  if (!c) return null;
+
+  await supabase.from("conversation_members").insert([
+    { conversation_id: c.id, user_id: me },
+    { conversation_id: c.id, user_id: otherUserId },
+  ]);
+
+  return c.id as string;
+}
+
+async function createGroupByUserIds(name: string, userIds: string[]): Promise<string | null> {
+  const me = await getMyUserId();
+  if (!me) return null;
+
+  const { data: c } = await supabase
+    .from("conversations")
+    .insert({ name: name.trim(), is_dm: false })
+    .select("id")
+    .single();
+  if (!c) return null;
+
+  const uniqueIds = Array.from(new Set([me, ...userIds]));
+  await supabase.from("conversation_members").insert(
+    uniqueIds.map(uid => ({ conversation_id: c.id, user_id: uid }))
+  );
+
+  return c.id as string;
+}
+
+type ConversationSummary = {
+  id: string;
+  title?: string | null;
+  name?: string | null;
+  is_dm?: boolean | null;
+};
+
 
 
 // -----------------------------------------------------------------------------
@@ -627,6 +736,60 @@ export default function App() {
   const [myId, setMyId] = useState<string | null>(null);
   const [myEventsOpen, setMyEventsOpen] = useState(false);
 
+  const [matchCandidates, setMatchCandidates] = useState<MatchCandidate[]>([]);
+  const [connIndex, setConnIndex] = useState<Record<string, ConnState>>({});
+
+
+  // --- SHARE EVENT MODAL STATE ---
+const [shareEventId, setShareEventId] = useState<string | null>(null);
+const [shareTargetId, setShareTargetId] = useState<string | null>(null);
+const [shareConversations, setShareConversations] = useState<ConversationSummary[]>([]);
+const [loadingShareConvos, setLoadingShareConvos] = useState(false);
+const [sendingShare, setSendingShare] = useState(false);
+
+// Call this from your Events screen/card "Share" button.
+function openShareModalForEvent(eventId: string) {
+  setShareEventId(eventId);
+  setShareTargetId(null);
+}
+
+// Load my conversations when the modal opens
+useEffect(() => {
+  if (!shareEventId) return;
+  (async () => {
+    setLoadingShareConvos(true);
+    try {
+      const convos = await listMyConversations(); // you already have this helper
+      setShareConversations(convos as ConversationSummary[]);
+    } finally {
+      setLoadingShareConvos(false);
+    }
+  })();
+}, [shareEventId]);
+
+// Close on ESC
+useEffect(() => {
+  if (!shareEventId) return;
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") setShareEventId(null);
+  };
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
+}, [shareEventId]);
+
+async function confirmShare() {
+  if (!shareEventId || !shareTargetId) return;
+  try {
+    setSendingShare(true);
+    await sendMessage(shareTargetId, "", shareEventId); // <— the required call
+    // success → close
+    setShareEventId(null);
+    setShareTargetId(null);
+  } finally {
+    setSendingShare(false);
+  }
+}
+
   // 🔹 Auth state
   const [authed, setAuthed] = useState(() => storage.get("nexa_authed", false));
   const [currentEmail, setCurrentEmail] = useState(() => storage.get("nexa_current_email", ""));
@@ -654,11 +817,56 @@ export default function App() {
 
   useEffect(() => { refreshEvents(); }, []);
 
-  useEffect(() => {
-    fetchEvents()
-      .then(setEvents)
-      .catch((err) => console.error("Failed to fetch events", err));
-  }, []);
+  async function refreshMatches() {
+    try {
+      const [cands, idx] = await Promise.all([
+        fetchMatchCandidates(50),
+        fetchMyConnectionIndex(),
+      ]);
+
+      // Optional: score by your existing scoreMatch, reusing your User shape
+      const ranked = cands
+        .map(c => ({
+          c,
+          score: scoreMatch(
+            me,
+            {
+              id: c.id,
+              name: c.name,
+              uni: c.uni || "",
+              course: c.course || "",
+              year: me.year ?? 1,
+              interests: c.interests,
+              goals: c.goals,
+              availability: c.availability,
+              learning: { style: "", groupSize: "", frequency: "" },
+            } as any
+          ),
+        }))
+        .sort((a, b) => b.score - a.score)
+        .map(x => x.c);
+
+      setMatchCandidates(ranked);
+      setConnIndex(idx);
+    } catch (e) {
+      console.error("refreshMatches failed", e);
+    }
+  }
+
+  useEffect(() => { refreshMatches(); }, [authed, me?.uni, me?.course, me?.goals?.length, me?.interests?.length]);
+
+  async function handleRequestConnect(targetId: string) {
+  try {
+    await sendConnectionRequest(targetId);
+    const idx = await fetchMyConnectionIndex();
+    setConnIndex(idx);
+  } catch (e) {
+    console.error("sendConnectionRequest failed", e);
+    alert("Couldn’t send request.");
+  }
+}
+
+
 
 
 
@@ -801,7 +1009,7 @@ async function handleCancelRSVP(eventId: string) {
 
 
   // 🔹 Helpers
-  const pool = useMemo(() => SAMPLE_PROFILES, []);
+  const [pool, setPool] = useState<User[]>([]);
   const likedUsers = pool.filter((p) => likes.includes(p.id));
 
   // Compute candidate list sorted by score
@@ -814,9 +1022,17 @@ async function handleCancelRSVP(eventId: string) {
 
   const topCandidate = candidates[0];
 
-  function like(id: string) {
-    setLikes((prev) => [...new Set([...prev, id])]);
-  }
+  async function like(id: string) {
+    try {
+      await createConnection(id);                    // writes to public.connections
+      setLikes(prev => [...new Set([...prev, id])]); // keep your local gate to hide seen cards
+      alert("Connected! 🎉");
+    } catch (e) {
+      console.error("createConnection failed", e);
+      alert("Sorry, couldn’t connect.");
+    }
+}
+
   function skip(id: string) {
     setSkips((prev) => [...new Set([...prev, id])]);
   }
@@ -893,26 +1109,24 @@ async function handleCancelRSVP(eventId: string) {
           {tab === "matches" && (
             <MatchScreen
               me={me}
-              candidate={topCandidate}
-              onLike={() => topCandidate && like(topCandidate.profile.id)}
-              onSkip={() => topCandidate && skip(topCandidate.profile.id)}
-              likedUsers={likedUsers}
-              suggestGroup={createGroupSuggestion}
+              candidates={matchCandidates}
+              connIndex={connIndex}
+              onRequestConnect={handleRequestConnect}
             />
           )}
           {tab === "messages" && (
-            <MessagesScreen pool={pool} />
+            <MessagesScreen events={events} />
           )}
           {tab === "events" && (
             <EventsScreen
-              pool={pool}
-              events={events}          // ✅ new
+              events={events}
               filters={filters}
               setFilters={setFilters}
-              me={me}
               myId={myId}
               onRSVP={handleRSVP}
               onCancelRSVP={handleCancelRSVP}
+              onShareEvent={openShareModalForEvent}
+
             />
           )}
           {tab === "profile" && (
@@ -999,6 +1213,83 @@ async function handleCancelRSVP(eventId: string) {
           </div>
         </div>
       )}
+
+        {/* SHARE EVENT MODAL */}
+{shareEventId && (
+  <div
+    className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+    onClick={() => setShareEventId(null)}
+  >
+    <div
+      className="w-full max-w-md rounded-2xl bg-white p-4 shadow-xl"
+      onClick={(e) => e.stopPropagation()}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Share event to a conversation"
+    >
+      <div className="mb-3 flex items-center justify-between">
+        <div className="text-base font-semibold">Share event</div>
+        <button
+          className="rounded-lg px-2 py-1 text-sm text-neutral-500 hover:bg-neutral-100"
+          onClick={() => setShareEventId(null)}
+        >
+          Close
+        </button>
+      </div>
+
+      {/* Optional: tiny hint showing event id (hide if you prefer) */}
+      <div className="mb-3 text-xs text-neutral-500">Event ID: {shareEventId}</div>
+
+      <div className="mb-3 max-h-72 overflow-y-auto rounded-xl border">
+        {loadingShareConvos ? (
+          <div className="p-3 text-sm text-neutral-500">Loading conversations…</div>
+        ) : shareConversations.length === 0 ? (
+          <div className="p-3 text-sm text-neutral-500">You have no conversations yet.</div>
+        ) : (
+          <ul className="divide-y">
+            {shareConversations.map((c) => {
+              const label = c.title || c.name || (c.is_dm ? "Direct Message" : "Group");
+              return (
+                <li key={c.id}>
+                  <label className="flex cursor-pointer items-center gap-3 p-3 hover:bg-neutral-50">
+                    <input
+                      type="radio"
+                      name="shareTarget"
+                      className="h-4 w-4"
+                      checked={shareTargetId === c.id}
+                      onChange={() => setShareTargetId(c.id)}
+                    />
+                    <div className="flex flex-col">
+                      <span className="text-sm font-medium text-neutral-900">{label}</span>
+                      <span className="text-xs text-neutral-500">{c.is_dm ? "Direct message" : "Group chat"}</span>
+                    </div>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                className="rounded-xl border px-3 py-2 text-sm"
+                onClick={() => setShareEventId(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-xl bg-neutral-900 px-3 py-2 text-sm text-white disabled:opacity-50"
+                disabled={!shareTargetId || sendingShare}
+                onClick={confirmShare}
+              >
+                {sendingShare ? "Sharing…" : "Share"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* Onboarding overlay */}
       {!onboarded && <Onboarding me={me} setMe={setMe} setOnboarded={setOnboarded} />}
@@ -1305,73 +1596,267 @@ function HeroCard({ me, onboarded, setOnboarded }: any) {
   );
 }
 
-function MatchScreen({ me, candidate, onLike, onSkip, likedUsers, suggestGroup }: any) {
-  const group = suggestGroup();
+function matchReasons(me: any, p: MatchCandidate): string[] {
+  const r: string[] = [];
+  if (me?.uni && p.uni && me.uni === p.uni) r.push("Same university");
+  const myCode = (me?.course || "").split(" ")[0];
+  const theirCode = (p.course || "").split(" ")[0];
+  if (myCode && theirCode && myCode === theirCode) r.push(`Same course code (${myCode})`);
+  const sharedInterests = (p.interests || []).filter((x: string) => (me?.interests || []).includes(x));
+  if (sharedInterests.length) r.push(`Shared interests: ${sharedInterests.slice(0, 3).join(", ")}`);
+  const sharedAvail = (p.availability || []).filter((x: string) => (me?.availability || []).includes(x));
+  if (sharedAvail.length) r.push(`Overlapping availability: ${sharedAvail.slice(0, 3).join(", ")}`);
+  if (!r.length) r.push("General compatibility");
+  return r.slice(0, 4);
+}
+
+function MatchScreen({
+  me,
+  candidates,
+  connIndex,
+  onRequestConnect,
+}: {
+  me: any;
+  candidates: MatchCandidate[];
+  connIndex: Record<string, ConnState>;
+  onRequestConnect: (targetId: string) => void;
+}) {
+  // --- quick filters ---
+  const [sameUni, setSameUni] = React.useState(false);
+  const [sameCourse, setSameCourse] = React.useState(false);
+  const [overlapInterests, setOverlapInterests] = React.useState(false);
+  const [overlapAvail, setOverlapAvail] = React.useState(false);
+
+  const filtered = React.useMemo(() => {
+    const myCode = (me?.course || "").split(" ")[0];
+    return (candidates || []).filter((p) => {
+      if (sameUni && !(me?.uni && p.uni && me.uni === p.uni)) return false;
+      if (sameCourse) {
+        const their = (p.course || "").split(" ")[0];
+        if (!(myCode && their && myCode === their)) return false;
+      }
+      if (overlapInterests && !(p.interests || []).some((x) => (me?.interests || []).includes(x))) return false;
+      if (overlapAvail && !(p.availability || []).some((x) => (me?.availability || []).includes(x))) return false;
+      return true;
+    });
+  }, [candidates, me, sameUni, sameCourse, overlapInterests, overlapAvail]);
+
+  // --- pagination (4 at a time) ---
+  const PAGE = 4;
+  const [page, setPage] = React.useState(0);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE));
+  React.useEffect(() => setPage(0), [sameUni, sameCourse, overlapInterests, overlapAvail, candidates.length]);
+  const pageItems = React.useMemo(() => {
+    const start = page * PAGE;
+    return filtered.slice(start, start + PAGE);
+  }, [filtered, page]);
+
+  // --- view details modal ---
+  const [view, setView] = React.useState<MatchCandidate | null>(null);
+
   return (
     <div className="space-y-4">
-      {/* Current card */}
+      {/* Header */}
       <div className={cardBase}>
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-semibold">Suggested Match</div>
-          <div className="text-xs text-neutral-500">Swipe‑like actions</div>
+        <div className="mb-2 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Users className="h-4 w-4" /> Suggested Matches
+          </div>
+          <div className="text-xs text-neutral-500">
+            {filtered.length} found{filtered.length ? ` • showing ${Math.min(filtered.length, page * PAGE + 1)}–${Math.min(filtered.length, (page + 1) * PAGE)}` : ""}
+          </div>
         </div>
-        {candidate ? (
-          <div className="mt-3">
-            <ProfileCard profile={candidate.profile} />
-            <div className="mt-4 grid grid-cols-2 gap-3">
-              <button className={cx(btnBase, "border bg-white")} onClick={onSkip}>
-                <X className="mr-2 h-4 w-4" /> Skip
+
+        {/* Quick filters */}
+        <div className="mb-3 flex flex-wrap gap-2">
+          <button
+            className={cx(chipBase, sameUni ? "border-indigo-500 bg-indigo-50" : "border-neutral-200 bg-white")}
+            onClick={() => setSameUni((v) => !v)}
+          >
+            Same uni
+          </button>
+          <button
+            className={cx(chipBase, sameCourse ? "border-indigo-500 bg-indigo-50" : "border-neutral-200 bg-white")}
+            onClick={() => setSameCourse((v) => !v)}
+          >
+            Same course code
+          </button>
+          <button
+            className={cx(chipBase, overlapInterests ? "border-indigo-500 bg-indigo-50" : "border-neutral-200 bg-white")}
+            onClick={() => setOverlapInterests((v) => !v)}
+          >
+            Shared interests
+          </button>
+          <button
+            className={cx(chipBase, overlapAvail ? "border-indigo-500 bg-indigo-50" : "border-neutral-200 bg-white")}
+            onClick={() => setOverlapAvail((v) => !v)}
+          >
+            Overlapping availability
+          </button>
+          {(sameUni || sameCourse || overlapInterests || overlapAvail) && (
+            <button
+              className={cx(chipBase, "border-neutral-200 bg-white")}
+              onClick={() => { setSameUni(false); setSameCourse(false); setOverlapInterests(false); setOverlapAvail(false); }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
+        {/* List */}
+        {filtered.length === 0 ? (
+          <div className="text-sm text-neutral-600">No suggestions match your filters.</div>
+        ) : (
+          <div className="space-y-3">
+            {pageItems.map((p) => {
+              const status = connIndex[p.id] ?? "none";
+              const disabled = status !== "none";
+              const label =
+                status === "accepted"
+                  ? "Connected"
+                  : status === "outgoing-pending"
+                  ? "Requested"
+                  : status === "incoming-pending"
+                  ? "They requested you"
+                  : "Connect";
+
+              const reasons = matchReasons(me, p);
+
+              return (
+                <div key={p.id} className="flex items-start gap-3 rounded-xl border bg-white p-3">
+                  <Avatar name={p.name} size={36} seed={p.id.length % 7} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="truncate text-sm font-medium">{p.name}</div>
+                      <button
+                        className={cx(btnBase, "border bg-white text-xs")}
+                        onClick={() => setView(p)}
+                      >
+                        View
+                      </button>
+                    </div>
+                    <div className="text-xs text-neutral-600 truncate">
+                      {(p.course || "Course")} • {(p.uni || "University")}
+                    </div>
+
+                    {/* tags */}
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {(p.interests || []).slice(0, 3).map((t) => (
+                        <span key={t} className={cx(chipBase, "border-neutral-200 bg-white")}>
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* reasons */}
+                    <div className="mt-2 text-[11px] text-neutral-600">
+                      {reasons.join(" • ")}
+                    </div>
+                  </div>
+
+                  <button
+                    className={cx(
+                      btnBase,
+                      disabled ? "border bg-neutral-100 text-neutral-500 cursor-default" : "bg-neutral-900 text-white"
+                    )}
+                    disabled={disabled}
+                    onClick={() => onRequestConnect(p.id)}
+                    title={label}
+                  >
+                    {label}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Pager */}
+        {filtered.length > PAGE && (
+          <div className="mt-3 flex items-center justify-between">
+            <button
+              className="rounded-xl border px-3 py-1.5 text-sm disabled:opacity-50"
+              disabled={page === 0}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+            >
+              Prev
+            </button>
+            <div className="text-xs text-neutral-600">
+              Page {page + 1} of {pageCount}
+            </div>
+            <button
+              className="rounded-xl border px-3 py-1.5 text-sm disabled:opacity-50"
+              disabled={page >= pageCount - 1}
+              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            >
+              Next
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* View details modal */}
+      {view && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4" onClick={() => setView(null)}>
+          <div className="w-full max-w-md rounded-2xl bg-white p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-sm font-semibold">Profile</div>
+              <button className="rounded-lg px-2 py-1 text-sm text-neutral-500 hover:bg-neutral-100" onClick={() => setView(null)}>
+                Close
               </button>
-              <button className={cx(btnBase, "bg-indigo-600 text-white")} onClick={onLike}>
-                <Check className="mr-2 h-4 w-4" /> Connect
+            </div>
+            <div className="flex items-start gap-3">
+              <Avatar name={view.name} size={48} seed={view.id.length % 7} />
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{view.name}</div>
+                <div className="text-xs text-neutral-600">{view.course || "Course"} • {view.uni || "University"}</div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {(view.interests || []).map((t) => (
+                    <span key={t} className={cx(chipBase, "border-neutral-200 bg-white")}>{t}</span>
+                  ))}
+                </div>
+                {(view.availability || []).length > 0 && (
+                  <div className="mt-2 text-xs text-neutral-600">
+                    Availability: {(view.availability || []).join(", ")}
+                  </div>
+                )}
+                <div className="mt-3 text-xs text-neutral-700">
+                  <div className="font-medium mb-1">Why this match</div>
+                  <ul className="list-disc pl-5">
+                    {matchReasons(me, view).map((h, i) => <li key={i}>{h}</li>)}
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex gap-2">
+              <button className={cx(btnBase, "border bg-white")} onClick={() => setView(null)}>Close</button>
+              <button
+                className={cx(
+                  btnBase,
+                  (connIndex[view.id] ?? "none") !== "none"
+                    ? "border bg-neutral-100 text-neutral-500 cursor-default"
+                    : "bg-neutral-900 text-white"
+                )}
+                disabled={(connIndex[view.id] ?? "none") !== "none"}
+                onClick={() => onRequestConnect(view.id)}
+              >
+                {(connIndex[view.id] ?? "none") === "accepted"
+                  ? "Connected"
+                  : (connIndex[view.id] ?? "none") === "outgoing-pending"
+                  ? "Requested"
+                  : (connIndex[view.id] ?? "none") === "incoming-pending"
+                  ? "They requested you"
+                  : "Connect"}
               </button>
             </div>
           </div>
-        ) : (
-          <div className="mt-3 text-sm text-neutral-600">No more suggestions for now. Check Events to meet more students.</div>
-        )}
-      </div>
-
-      {/* Group suggestion */}
-      <div className={cardBase}>
-        <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><Users className="h-4 w-4" /> Suggested Study Group</div>
-        {group.length ? (
-          <div className="space-y-3">
-            {group.map((p: any) => (
-              <div key={p.id} className="flex items-center gap-3">
-                <Avatar name={p.name} size={36} seed={p.seed} />
-                <div className="flex-1">
-                  <div className="text-sm font-medium">{p.name}</div>
-                  <div className="text-xs text-neutral-600">{p.course} • {p.uni}</div>
-                </div>
-                <span className={cx(chipBase, "border-neutral-200 bg-white")}>
-                  {p.learning.groupSize} ppl
-                </span>
-              </div>
-            ))}
-            <button className={cx(btnBase, "w-full bg-neutral-900 text-white")}>Start Group Chat</button>
-          </div>
-        ) : (
-          <div className="text-sm text-neutral-600">Like a few profiles to get a smart group suggestion.</div>
-        )}
-      </div>
-
-      {/* Your likes */}
-      <div className={cardBase}>
-        <div className="mb-2 text-sm font-semibold">Your Likes</div>
-        {likedUsers.length ? (
-          <div className="space-y-3">
-            {likedUsers.map((p: any) => (
-              <CompactProfile key={p.id} p={p} />
-            ))}
-          </div>
-        ) : (
-          <div className="text-sm text-neutral-600">You haven't liked anyone yet.</div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
+
 
 function ProfileCard({ profile, }: any) {
   return (
@@ -1428,7 +1913,8 @@ function CompactProfile({ p }: any) {
 
 // ---- Chat Screen (left: chat log, right: messages) ----
 
-function MessagesScreen() {
+function MessagesScreen({ events }: { events: EventUI[] }) {
+
   // LEFT: chat log state
   const [conversations, setConversations] = useState<any[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -1442,6 +1928,14 @@ function MessagesScreen() {
   // RIGHT: current thread state
   const [thread, setThread] = useState<any[]>([]);
   const unsubRef = useRef<null | (() => void)>(null);
+
+  const [connections, setConnections] = useState<ConnectionProfile[]>([]);
+  const [dmSelection, setDmSelection] = useState<string | null>(null);
+  const [groupSelection, setGroupSelection] = useState<string[]>([]);
+
+  useEffect(() => { (async () => setConnections(await listMyConnections()))(); }, []);
+
+
 
   // --- Load chat log + auto-select latest ---
   async function refreshConversations() {
@@ -1495,6 +1989,12 @@ function MessagesScreen() {
     return () => unsubRef.current?.();
   }, [selectedId]);
 
+  <ChatBox
+    conversationId={selectedId}
+    messages={thread}
+    events={events}                  // ✅ pass events here
+    onSend={(t, eventId) => sendMessage(selectedId!, t, eventId)}
+  />
   return (
     <div className="grid grid-rows-[auto,1fr] gap-4">
       {/* LEFT: Chat log */}
@@ -1504,18 +2004,38 @@ function MessagesScreen() {
           <button className={ui.button} onClick={refreshConversations}>Refresh</button>
         </div>
 
-        {/* Start DM */}
-        <div className="mb-3 flex gap-2">
-          <input
-            className={ui.input}
-            placeholder="friend@example.com"
-            value={dmEmail}
-            onChange={(e) => setDmEmail(e.target.value)}
-          />
-          <button className={ui.button} onClick={handleOpenDM} disabled={!dmEmail.trim()}>
-            DM
-          </button>
+        {/* Start a DM by picking a connection */}
+        <div className="mb-3">
+          <div className="flex gap-2">
+            <select
+              className="w-full rounded-xl border px-3 py-2 text-sm"
+              value={dmSelection ?? ""}
+              onChange={(e) => setDmSelection(e.target.value || null)}
+            >
+              <option value="">Select a connection…</option>
+              {connections.map(c => (
+                <option key={c.user_id} value={c.user_id}>
+                  {c.full_name || c.email || c.user_id}
+                </option>
+              ))}
+            </select>
+
+            <button
+              className="rounded-xl bg-neutral-900 px-3 py-2 text-sm text-white disabled:opacity-50"
+              disabled={!dmSelection}
+              onClick={async () => {
+                if (!dmSelection) return;
+                const cid = await openOrCreateDMByUserId(dmSelection);
+                if (!cid) return alert("Could not start DM.");
+                setSelectedId(cid);
+                refreshConversations();
+              }}
+            >
+              DM
+            </button>
+          </div>
         </div>
+
 
         {/* New Group */}
         <button className={`${ui.button} w-full mb-3`}>
@@ -1561,15 +2081,16 @@ function MessagesScreen() {
 
       {/* RIGHT: Active conversation */}
       <div className={ui.card}>
-         {selectedId ? (
-           <ChatBox
-             conversationId={selectedId}
-             messages={thread}
-             onSend={(t) => sendMessage(selectedId, t)}
-           />
-         ) : (
-           <div className="text-sm text-neutral-600">Select a chat or start one.</div>
-         )}
+        {selectedId ? (
+          <ChatBox
+            conversationId={selectedId}
+            messages={thread}
+            events={events}
+            onSend={(t) => sendMessage(selectedId, t)}
+          />
+        ) : (
+          <div className="text-sm text-neutral-600">Select a chat or start one.</div>
+        )}
       </div>
 
       {/* Modal: Create Group */}
@@ -1583,19 +2104,47 @@ function MessagesScreen() {
               value={groupName}
               onChange={(e) => setGroupName(e.target.value)}
             />
-            <textarea
-              className="mb-3 w-full rounded-xl border px-3 py-2 text-sm"
-              rows={3}
-              placeholder="Emails separated by commas"
-              value={groupEmails}
-              onChange={(e) => setGroupEmails(e.target.value)}
-            />
-            <div className="flex gap-2">
-              <button className="rounded-xl border px-3 py-2 text-sm" onClick={() => setNewGroupOpen(false)}>Cancel</button>
-              <button className="rounded-xl bg-neutral-900 px-3 py-2 text-sm text-white" onClick={handleCreateGroup}>Create</button>
+            <div className="mb-3 max-h-60 overflow-y-auto rounded-xl border p-2">
+              {connections.length === 0 ? (
+                <div className="text-sm text-neutral-500">You have no connections yet.</div>
+              ) : connections.map(c => {
+                const checked = groupSelection.includes(c.user_id);
+                return (
+                  <label key={c.user_id} className="flex items-center gap-2 py-1 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() =>
+                        setGroupSelection(prev => checked
+                          ? prev.filter(id => id !== c.user_id)
+                          : [...prev, c.user_id])
+                      }
+                    />
+                    <span>{c.full_name || c.email || c.user_id}</span>
+                  </label>
+                );
+              })
+              }
             </div>
+
+            <button
+              className="rounded-xl bg-neutral-900 px-3 py-2 text-sm text-white"
+              onClick={async () => {
+                if (!groupName.trim() || groupSelection.length === 0) return;
+                const cid = await createGroupByUserIds(groupName, groupSelection);
+                if (!cid) return alert("Could not create group.");
+                setNewGroupOpen(false);
+                setGroupName("");
+                setGroupSelection([]);
+                setSelectedId(cid);
+                refreshConversations();
+              }}
+            >
+              Create
+            </button>
           </div>
         </div>
+
       )}
     </div>
   );
@@ -1605,14 +2154,17 @@ function ChatBox({
   conversationId,
   messages,
   onSend,
+  events,
 }: {
   conversationId: string;
   messages: any[];
-  onSend: (t: string) => void;
+  onSend: (t: string, eventId?: string) => void;
+  events: EventUI[];
 }) {
   const [text, setText] = useState("");
   const [myId, setMyId] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const [attachOpen, setAttachOpen] = useState(false);
 
   useEffect(() => { getMyUserId().then(setMyId); }, []);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
@@ -1632,7 +2184,36 @@ function ChatBox({
                 className={`max-w-[78%] rounded-2xl px-3 py-2 text-sm shadow-sm
                 ${fromMe ? "bg-indigo-600 text-white" : "bg-neutral-100 text-neutral-900"}`}
               >
-                <div>{m.text}</div>
+                <div>{m.event_id ? (
+                  <EventAttachment eventId={m.event_id} />
+                ) : (
+                  <div>{m.text}</div>
+                )}</div>
+                <div>
+                  <button className="rounded-xl border px-3 py-2 text-sm" type="button" onClick={() => setAttachOpen(true)}>
+                    Attach Event
+                  </button>
+
+                  {attachOpen && (
+                    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4" onClick={() => setAttachOpen(false)}>
+                      <div className="w-full max-w-md rounded-2xl bg-white p-4" onClick={(e) => e.stopPropagation()}>
+                        <div className="mb-2 text-sm font-semibold">Share an event</div>
+                        <div className="max-h-72 overflow-y-auto">
+                          {events.map((ev) => (
+                            <button
+                              key={ev.id}
+                              className="mb-2 w-full rounded-xl border p-2 text-left text-sm"
+                              onClick={() => { onSend("", ev.id); setAttachOpen(false); }}
+                            >
+                              <div className="font-medium">{ev.title}</div>
+                              <div className="text-xs text-neutral-600">{ev.time} · {ev.location}</div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
                 <div className={`mt-1 text-[10px] ${fromMe ? "text-white/70" : "text-neutral-500"}`}>
                   {new Date(m.created_at).toLocaleString([], { hour: "2-digit", minute: "2-digit" })}
                 </div>
@@ -1666,13 +2247,14 @@ function ChatBox({
 }
 
 
-function EventsScreen({ events, filters, setFilters, onRSVP, onCancelRSVP, myId }: {
+function EventsScreen({ events, filters, setFilters, onRSVP, onCancelRSVP, myId, onShareEvent }: {
   events: EventUI[];
   filters: string[];
   setFilters: (v: string[]) => void;
   onRSVP: (id: string) => void;
   onCancelRSVP: (id: string) => void; 
   myId: string | null;
+  onShareEvent: (id: string) => void;
 }) {
   const [sourceFilters, setSourceFilters] = React.useState<string[]>([]);
 
@@ -1894,6 +2476,13 @@ function EventsScreen({ events, filters, setFilters, onRSVP, onCancelRSVP, myId 
                           >
                             View Info
                           </button>
+                            <button
+                              className="flex-1 rounded-lg border px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+                              onClick={() => onShareEvent(e.id)}
+                            >
+                              Share
+                            </button>
+
                         </>
                       )}
                     </div>
@@ -1907,6 +2496,37 @@ function EventsScreen({ events, filters, setFilters, onRSVP, onCancelRSVP, myId 
     </div>
   );
 }
+
+function EventAttachment({ eventId }: { eventId: string }) {
+  const [ev, setEv] = React.useState<any | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from("events")
+        .select("id, title, starts_at, location, source, tags")
+        .eq("id", eventId)
+        .single();
+      if (!error && data) setEv(data);
+    })();
+  }, [eventId]);
+
+  if (!ev) return <div className="text-xs text-neutral-500">Loading event…</div>;
+
+  const time = new Date(ev.starts_at).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  return (
+    <div className="rounded-xl border bg-white p-2 text-sm">
+      <div className="font-medium">{ev.title}</div>
+      <div className="mt-1 text-xs text-neutral-600">{time}{ev.location ? ` · ${ev.location}` : ""}</div>
+      <div className="mt-2 flex flex-wrap gap-1">
+        {(ev.tags || []).map((t: string) => (
+          <span key={t} className="rounded border px-2 py-0.5 text-[11px]">{t}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 
 
 function ProfileScreen({ me, setMe, setOnboarded }: any) {
@@ -2452,6 +3072,7 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
   const pendingError = validateStep(currentTitle, draft, isReOnboarding);
   // Button can proceed only if there’s no validation error AND (if applicable) DOB format is OK
   const canProceed = !pendingError && dobFormatOk;
+
 
   return (
     <div
