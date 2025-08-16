@@ -51,26 +51,47 @@ const storage = {
 // -----------------------------------------------------------------------------
 interface User {
   id: string;
-  name: string;
-  email?: string;
-  password?: string;
+
+  // Identity
+  name: string;            // display name (can keep using)
+  firstName?: string;
+  lastName?: string;
+  dob?: string;            // dd/MM/yyyy
+
+  // Home
+  homeCountry?: string;
+  homeTown?: string;
+
+  // Education
   uni: string;
   course: string;
+  major?: string;       
   year: number;
-  from?: string;
-  interests: string[];
-  goals: string[];
+  studentType?: "International" | "Domestic";
+
+  // Goals & interests
+  academicGoals?: string[];       // NEW (distinct from "goals" if you want)
+  careerAspirations?: string[];   // NEW
+  hobbies?: string[];             // NEW
+  interests: string[];            // existing (you can keep using this too)
+  goals: string[];                // existing (you can keep or repurpose)
+
+  // Study prefs
   learning: {
     style: string;
     groupSize: string;
-    frequency: string;
+    frequency: string;            // “Study availability frequency”
   };
+
+  // Availability
   availability: string[];
+
   socialBreak?: boolean;
   privacy?: {
     showLocation: boolean;
     shareProfileWithMatchesOnly: boolean;
   };
+
   compatibilityHints?: string[];
   seed?: number;
 }
@@ -214,9 +235,19 @@ const SEEDED_MESSAGES: Record<string, Message[]> = {
 const DEFAULT_USER: User = {
   id: "me",
   name: "You",
+  firstName: "",
+  lastName: "",
+  dob: "",
+  homeCountry: "",
+  homeTown: "",
   uni: "Monash University",
   course: "Bachelor of IT",
+  major: "",
   year: 2,
+  studentType: undefined,
+  academicGoals: [],
+  careerAspirations: [],
+  hobbies: [],
   goals: [],
   interests: [],
   learning: { style: "", groupSize: "", frequency: "" },
@@ -944,66 +975,353 @@ function ProfileScreen({ me, setMe, setOnboarded }: any) {
 // -----------------------------------------------------------------------------
 function Onboarding({ me, setMe, setOnboarded }: any) {
   const [step, setStep] = useState(0);
-  const [draft, setDraft] = useState(me);
+  const [error, setError] = useState<string | null>(null);
 
-  const steps = [
-    {
-      title: "Welcome to Nexa",
-      content: (
-        <p className="text-sm text-neutral-700">
-          Let's set up your profile to find compatible study buddies and small groups. This takes about a minute.
-        </p>
-      ),
-    },
-    {
-      title: "Your Goals",
-      content: (
-        <ChipsInput
+function isTextFilled(v?: string) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+function isListFilled(v?: string[]) {
+  return Array.isArray(v) && v.length > 0;
+}
+
+const [draft, setDraft] = useState<User>(me);
+
+// Heuristic: if first/last name already exist, treat this pass as re-onboarding
+const isReOnboarding =
+  Boolean(me?.firstName || me?.lastName || (me?.academicGoals?.length || 0) > 0);
+
+// ---- Full Onboarding ----
+const stepsFull = [
+  {
+    title: "Welcome to Nexa",
+    content: (
+      <p className="text-sm text-neutral-700">
+        Let's set up your profile to find compatible study buddies and small groups. This takes about a minute.
+      </p>
+    ),
+  },
+  {
+    title: "About You",
+    content: (
+      <div className="grid grid-cols-2 gap-2">
+        <TextInput
           autoFocus
-          label="What are you seeking from this app?"
-          value={draft.goals}
-          onChange={(v) => setDraft({ ...draft, goals: v })}
-          placeholder="e.g., Study partner, Front‑end pathway, Cyber labs"
+          label="First Name"
+          value={draft.firstName || ""}
+          onChange={(v: string) => setDraft({ ...draft, firstName: v })}
+          placeholder="e.g., Alex"
         />
-      ),
-    },
-    {
-      title: "Interests",
-      content: (
-        <ChipsInput
-          label="Academic & personal interests"
-          value={draft.interests}
-          onChange={(v) => setDraft({ ...draft, interests: v })}
-          placeholder="e.g., React, Cybersecurity, Basketball, Bubble tea"
+        <TextInput
+          label="Last Name"
+          value={draft.lastName || ""}
+          onChange={(v: string) => setDraft({ ...draft, lastName: v })}
+          placeholder="e.g., Nguyen"
         />
-      ),
-    },
-    {
-      title: "Study Preferences",
-      content: (
-        <div className="grid grid-cols-3 gap-2">
-          <TextInput label="Style" value={draft.learning?.style || ""} onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, style: v } })} />
-          <TextInput label="Group size" value={draft.learning?.groupSize || ""} onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })} />
-          <TextInput label="Frequency" value={draft.learning?.frequency || ""} onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })} />
-        </div>
-      ),
-    },
-    {
-      title: "Availability",
-      content: (
-        <ChipsInput
-          label="When are you generally available to study?"
-          value={draft.availability}
-          onChange={(v) => setDraft({ ...draft, availability: v })}
-          placeholder="e.g., Mon AM, Tue PM, Weekend"
+        <TextInput
+          label="DOB (dd/MM/yyyy)"
+          value={draft.dob || ""}
+          onChange={(v: string) => setDraft({ ...draft, dob: v })}
+          placeholder="31/12/2003"
         />
-      ),
-    },
-  ];
+      </div>
+    ),
+  },
+  {
+    title: "Home",
+    content: (
+      <div className="grid grid-cols-2 gap-2">
+        <TextInput
+          label="Home Country"
+          value={draft.homeCountry || ""}
+          onChange={(v: string) => setDraft({ ...draft, homeCountry: v })}
+          placeholder="e.g., Australia"
+        />
+        <TextInput
+          label="Home Town"
+          value={draft.homeTown || ""}
+          onChange={(v: string) => setDraft({ ...draft, homeTown: v })}
+          placeholder="e.g., Melbourne"
+        />
+      </div>
+    ),
+  },
+  {
+    title: "Education",
+    content: (
+      <div className="grid grid-cols-2 gap-2">
+        <TextInput
+          label="University"
+          value={draft.uni || ""}
+          onChange={(v: string) => setDraft({ ...draft, uni: v })}
+          placeholder="e.g., Monash University"
+        />
+        <TextInput
+          label="Course"
+          value={draft.course || ""}
+          onChange={(v: string) => setDraft({ ...draft, course: v })}
+          placeholder="e.g., Bachelor of IT"
+        />
+        <TextInput
+          label="Major"
+          value={draft.major || ""}
+          onChange={(v: string) => setDraft({ ...draft, major: v })}
+          placeholder="e.g., Cybersecurity / Data Science"
+        />
+        <TextInput
+          label="Student Type"
+          value={draft.studentType || ""}
+          onChange={(v: string) =>
+            setDraft({ ...draft, studentType: (v === "International" || v === "Domestic") ? v as any : v as any })
+          }
+          placeholder="International / Domestic"
+        />
+      </div>
+    ),
+  },
+  {
+    title: "Academic Goals",
+    content: (
+      <ChipsInput
+        autoFocus
+        label="What are your academic goals?"
+        value={draft.academicGoals || []}
+        onChange={(v: string[]) => setDraft({ ...draft, academicGoals: v })}
+        placeholder="e.g., HD average, publish paper, exchange program"
+      />
+    ),
+  },
+  {
+    title: "Career Aspirations",
+    content: (
+      <ChipsInput
+        label="Your career aspirations"
+        value={draft.careerAspirations || []}
+        onChange={(v: string[]) => setDraft({ ...draft, careerAspirations: v })}
+        placeholder="e.g., Cyber analyst, Front-end dev, Product manager"
+      />
+    ),
+  },
+  {
+    title: "Hobbies",
+    content: (
+      <ChipsInput
+        label="What do you enjoy?"
+        value={draft.hobbies || []}
+        onChange={(v: string[]) => setDraft({ ...draft, hobbies: v })}
+        placeholder="e.g., Basketball, Lifting, Photography, Cooking"
+      />
+    ),
+  },
+  {
+    title: "Study Availability",
+    content: (
+      <ChipsInput
+        label="When are you generally available to study?"
+        value={draft.availability || []}
+        onChange={(v: string[]) => setDraft({ ...draft, availability: v })}
+        placeholder="e.g., Mon AM, Tue PM, Weekend"
+      />
+    ),
+  },
+  {
+    title: "Preferred Study Style",
+    content: (
+      <div className="grid grid-cols-3 gap-2">
+        <TextInput
+          label="Style"
+          value={draft.learning?.style || ""}
+          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, style: v } })}
+          placeholder="Solo / Group / Pair"
+        />
+        <TextInput
+          label="Group size"
+          value={draft.learning?.groupSize || ""}
+          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })}
+          placeholder="2 / 3–4 / 5+"
+        />
+        <TextInput
+          label="Frequency"
+          value={draft.learning?.frequency || ""}
+          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })}
+          placeholder="e.g., 2× per week"
+        />
+      </div>
+    ),
+  },
+];
 
-  const isLast = step === steps.length - 1;
+// ---- Re-Onboarding (quick update) ----
+const stepsRe = [
+  {
+    title: "Education",
+    content: (
+      <div className="grid grid-cols-2 gap-2">
+        <TextInput
+          autoFocus
+          label="University"
+          value={draft.uni || ""}
+          onChange={(v: string) => setDraft({ ...draft, uni: v })}
+        />
+        <TextInput
+          label="Course"
+          value={draft.course || ""}
+          onChange={(v: string) => setDraft({ ...draft, course: v })}
+        />  
+        <TextInput
+          label="Major"
+          value={draft.major || ""}
+          onChange={(v: string) => setDraft({ ...draft, major: v })}
+          placeholder="e.g., Cybersecurity / Data Science"
+        />
+        <TextInput
+          label="Student Type"
+          value={draft.studentType || ""}
+          onChange={(v: string) =>
+            setDraft({ ...draft, studentType: (v === "International" || v === "Domestic") ? v as any : v as any })
+          }
+          placeholder="International / Domestic"
+        />
+      </div>
+    ),
+  },
+  {
+    title: "Academic Goals",
+    content: (
+      <ChipsInput
+        label="What are your academic goals?"
+        value={draft.academicGoals || []}
+        onChange={(v: string[]) => setDraft({ ...draft, academicGoals: v })}
+      />
+    ),
+  },
+  {
+    title: "Career Aspirations",
+    content: (
+      <ChipsInput
+        label="Your career aspirations"
+        value={draft.careerAspirations || []}
+        onChange={(v: string[]) => setDraft({ ...draft, careerAspirations: v })}
+      />
+    ),
+  },
+  {
+    title: "Hobbies",
+    content: (
+      <ChipsInput
+        label="Hobbies"
+        value={draft.hobbies || []}
+        onChange={(v: string[]) => setDraft({ ...draft, hobbies: v })}
+      />
+    ),
+  },
+  {
+    title: "Study Availability",
+    content: (
+      <ChipsInput
+        label="When are you generally available to study?"
+        value={draft.availability || []}
+        onChange={(v: string[]) => setDraft({ ...draft, availability: v })}
+      />
+    ),
+  },
+  {
+    title: "Preferred Study Style",
+    content: (
+      <div className="grid grid-cols-3 gap-2">
+        <TextInput
+          label="Style"
+          value={draft.learning?.style || ""}
+          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, style: v } })}
+        />
+        <TextInput
+          label="Group size"
+          value={draft.learning?.groupSize || ""}
+          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })}
+        />
+        <TextInput
+          label="Frequency"
+          value={draft.learning?.frequency || ""}
+          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })}
+        />
+      </div>
+    ),
+  },
+];
+
+const steps = isReOnboarding ? stepsRe : stepsFull;
+
+const isLast = step === steps.length - 1;
+
+function validateStep(stepTitle: string, d: User, reOnboarding: boolean): string | null {
+  switch (stepTitle) {
+    // Full onboarding only
+    case "Welcome to Nexa":
+      return null; // no inputs here
+
+    case "About You":
+      if (!isTextFilled(d.firstName)) return "Please enter your first name.";
+      if (!isTextFilled(d.lastName)) return "Please enter your last name.";
+      if (!isTextFilled(d.dob)) return "Please enter your date of birth (dd/MM/yyyy).";
+      // Optional: format check (you already added this in next())
+      return null;
+
+    case "Home":
+      if (!isTextFilled(d.homeCountry)) return "Please enter your home country.";
+      if (!isTextFilled(d.homeTown)) return "Please enter your home town.";
+      return null;
+
+    // Shared (full + re-onboarding)
+    case "Education":
+      if (!isTextFilled(d.uni)) return "Please enter your university.";
+      if (!isTextFilled(d.course)) return "Please enter your course.";
+      if (!isTextFilled(d.studentType)) return "Please specify if you are an International or Domestic student.";
+      return null;
+
+    case "Academic Goals":
+      if (!isListFilled(d.academicGoals)) return "Please add at least one academic goal.";
+      return null;
+
+    case "Career Aspirations":
+      if (!isListFilled(d.careerAspirations)) return "Please add at least one career aspiration.";
+      return null;
+
+    case "Hobbies":
+      if (!isListFilled(d.hobbies)) return "Please add at least one hobby.";
+      return null;
+
+    case "Study Availability":
+      if (!isListFilled(d.availability)) return "Please add at least one availability slot.";
+      return null;
+
+    case "Preferred Study Style":
+      if (!isTextFilled(d.learning?.style)) return "Please enter your preferred study style.";
+      if (!isTextFilled(d.learning?.groupSize)) return "Please enter your preferred group size.";
+      if (!isTextFilled(d.learning?.frequency)) return "Please enter your study frequency.";
+      return null;
+
+    default:
+      return null;
+  }
+}
+
 
   function next() {
+     // Validate required fields for this step
+  const currentTitle = steps[step].title;
+  const validationError = validateStep(currentTitle, draft, isReOnboarding);
+  if (validationError) {
+    setError(validationError);
+    return;
+  }
+
+    // Validate DOB if we're on the DOB step of full onboarding
+  if (!isReOnboarding && steps[step].title === "About You" && draft.dob) {
+    const ddmmyyyy = /^(0?[1-9]|[12][0-9]|3[01])\/(0?[1-9]|1[0-2])\/\d{4}$/;
+    if (!ddmmyyyy.test(draft.dob)) {
+      alert("Please enter DOB in the format dd/MM/yyyy");
+      return; // stop progression
+    }
+  }
     if (isLast) {
       setMe(draft);
       setOnboarded(true);
@@ -1011,6 +1329,23 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
       setStep(step + 1);
     }
   }
+
+  // Inline gating for the button state (visual UX)
+  // Keep ddmmyyyy in sync with your next() guard
+  const ddmmyyyy = /^(0?[1-9]|[12][0-9]|3[01])\/(0?[1-9]|1[0-2])\/\d{4}$/;
+
+  const currentTitle = steps[step].title;
+  // If it's the About You step in full onboarding, also check DOB format
+  const dobFormatOk =
+    isReOnboarding ||
+    currentTitle !== "About You" ||
+    (!draft.dob ? false : ddmmyyyy.test(draft.dob));
+
+  // Use your validator to see if required fields are filled
+  const pendingError = validateStep(currentTitle, draft, isReOnboarding);
+  // Button can proceed only if there’s no validation error AND (if applicable) DOB format is OK
+  const canProceed = !pendingError && dobFormatOk;
+
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur">
@@ -1030,13 +1365,29 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
 
           <div className="mb-6">{steps[step].content}</div>
 
+          {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
+
           <div className="flex gap-3">
             {step > 0 && (
-              <button className={cx(btnBase, "border bg-white")} onClick={() => setStep(step - 1)}>
+              <button
+                className={cx(btnBase, "border bg-white")}
+                onClick={() => setStep(step - 1)}
+              >
                 Back
               </button>
             )}
-            <button className={cx(btnBase, "flex-1 bg-indigo-600 text-white")} onClick={next}>
+
+            <button
+              className={cx(
+                btnBase,
+                "flex-1",
+                canProceed
+                  ? "bg-indigo-600 text-white"
+                  : "bg-neutral-300 text-neutral-500 cursor-not-allowed"
+              )}
+              onClick={next}
+              disabled={!canProceed}
+            >
               {isLast ? "Complete Setup" : "Next"}
             </button>
           </div>
