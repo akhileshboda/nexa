@@ -595,7 +595,7 @@ function DropdownSelect({
       </button>
 
       {open && (
-        <div className="absolute z-40 mt-2 w-full overflow-hidden rounded-xl border bg-white shadow-lg">
+        <div className="mt-2 max-h-60 overflow-y-auto rounded-xl border bg-white shadow">
           <div className="p-2">
             <TextInput value={q} onChange={setQ} placeholder={placeholder} />
           </div>
@@ -681,7 +681,7 @@ function DropdownMultiSelect({
       </button>
 
       {open && (
-        <div className="absolute z-40 mt-2 w-full overflow-hidden rounded-xl border bg-white shadow-lg">
+        <div className="mt-2 max-h-60 overflow-y-auto rounded-xl border bg-white shadow">
           <div className="p-2">
             <TextInput value={q} onChange={setQ} placeholder={placeholder} />
           </div>
@@ -1196,6 +1196,14 @@ function ProfileScreen({ me, setMe, setOnboarded }: any) {
 function Onboarding({ me, setMe, setOnboarded }: any) {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") setOnboarded(true); // close modal
+  };
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
+}, [setOnboarded]);
+
 
 function isTextFilled(v?: string) {
   return typeof v === "string" && v.trim().length > 0;
@@ -1347,27 +1355,49 @@ const stepsFull = [
     ),
   },
   {
-    title: "Preferred Study Style",
+   title: "Preferred Study Style",
     content: (
       <div className="grid gap-3">
         <DropdownSelect
           label="Preferred Study Style"
-          options={STUDY_STYLE_OPTIONS}
+          options={STUDY_STYLE_OPTIONS} // ["Solo","Pair","Group"]
           value={draft.learning?.style || ""}
-          onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, style: v } })}
+          onChange={(v) => {
+            // clear hidden fields when style changes
+            const resets =
+              v === "Solo" ? { groupSize: "", frequency: "" } :
+              v === "Pair" ? { groupSize: "" } :
+              {};
+            setDraft({ ...draft, learning: { ...draft.learning, style: v, ...resets } });
+          }}
         />
-        <DropdownSelect
-          label="Preferred Group Size"
-          options={GROUP_SIZE_OPTIONS}
-          value={draft.learning?.groupSize || ""}
-          onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })}
-        />
-        <DropdownSelect
-          label="Study Availability Frequency"
-          options={FREQUENCY_OPTIONS}
-          value={draft.learning?.frequency || ""}
-          onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })}
-        />
+
+        {/* When Solo: show nothing else */}
+        {draft.learning?.style !== "Solo" && (
+          <>
+            {/* When Pair: hide group size; When Group: show it */}
+            {draft.learning?.style === "Group" && (
+              <DropdownSelect
+                label="Preferred Group Size"
+                options={GROUP_SIZE_OPTIONS}
+                value={draft.learning?.groupSize || ""}
+                onChange={(v) =>
+                  setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })
+                }
+              />
+            )}
+
+            {/* Pair & Group both show Frequency */}
+            <DropdownSelect
+              label="Study Availability Frequency"
+              options={FREQUENCY_OPTIONS}
+              value={draft.learning?.frequency || ""}
+              onChange={(v) =>
+                setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })
+              }
+            />
+          </>
+        )}
       </div>
     ),
   },
@@ -1379,102 +1409,130 @@ const stepsRe = [
     title: "Education",
     content: (
       <div className="grid gap-3">
-      <DropdownSelect
-        label="University"
-        options={UNI_OPTIONS}
-        value={draft.uni}
-        onChange={(v) => setDraft({ ...draft, uni: v })}
-        placeholder="Search universities..."
-      />
-
-      <DropdownSelect
-        label="Course"
-        options={COURSE_OPTIONS}
-        value={draft.course}
-        onChange={(v) => setDraft({ ...draft, course: v })}
-        placeholder="Search courses..."
-      />
-
-      <DropdownSelect
-        label="Major"
-        options={MAJOR_OPTIONS}
-        value={draft.major || ""}
-        onChange={(v) => setDraft({ ...draft, major: v })}
-        placeholder="Search majors..."
-      />
-
-      <DropdownSelect
-        label="Student Type"
-        options={["International", "Domestic"]}
-        value={draft.studentType}
-        onChange={(v) => setDraft({ ...draft, studentType: v as any })}
-      />
-    </div>
+        <DropdownSelect
+          label="University"
+          options={UNI_OPTIONS}
+          value={draft.uni}
+          onChange={(v) => setDraft({ ...draft, uni: v })}
+          placeholder="Search universities…"
+        />
+        <DropdownSelect
+          label="Course"
+          options={COURSE_OPTIONS}
+          value={draft.course}
+          onChange={(v) => setDraft({ ...draft, course: v })}
+          placeholder="Search courses…"
+        />
+        <DropdownSelect
+          label="Major"
+          options={MAJOR_OPTIONS}
+          value={draft.major || ""}
+          onChange={(v) => setDraft({ ...draft, major: v })}
+          placeholder="Search majors…"
+        />
+        <DropdownSelect
+          label="Student Type"
+          options={STUDENT_TYPE_OPTIONS}
+          value={draft.studentType}
+          onChange={(v) => setDraft({ ...draft, studentType: v as any })}
+        />
+      </div>
 
     ),
   },
   {
     title: "Academic Goals",
     content: (
-      <ChipsInput
-        label="What are your academic goals?"
-        value={draft.academicGoals || []}
-        onChange={(v: string[]) => setDraft({ ...draft, academicGoals: v })}
-      />
+      <DropdownMultiSelect
+      label="Academic Goals"
+      options={ACADEMIC_GOAL_OPTIONS}
+      value={draft.academicGoals || []}
+      onChange={(v) => setDraft({ ...draft, academicGoals: v })}
+        />
     ),
   },
   {
     title: "Career Aspirations",
     content: (
-      <ChipsInput
+      <DropdownMultiSelect
         label="Your career aspirations"
+        options={CAREER_ASPIRATION_OPTIONS}
         value={draft.careerAspirations || []}
-        onChange={(v: string[]) => setDraft({ ...draft, careerAspirations: v })}
+        onChange={(v) => setDraft({ ...draft, careerAspirations: v })}
       />
     ),
   },
   {
     title: "Hobbies",
     content: (
-      <ChipsInput
+      <DropdownMultiSelect
         label="Hobbies"
+        options={HOBBY_OPTIONS}
         value={draft.hobbies || []}
-        onChange={(v: string[]) => setDraft({ ...draft, hobbies: v })}
+        onChange={(v) => setDraft({ ...draft, hobbies: v })}
+        placeholder="Filter hobbies…"
       />
     ),
   },
   {
     title: "Study Availability",
     content: (
-      <ChipsInput
-        label="When are you generally available to study?"
+      <DropdownMultiSelect
+        label="Study Availability"
+        options={AVAILABILITY_OPTIONS}
         value={draft.availability || []}
-        onChange={(v: string[]) => setDraft({ ...draft, availability: v })}
+        onChange={(v) => setDraft({ ...draft, availability: v })}
+        placeholder="Filter times…"
       />
     ),
   },
   {
-    title: "Preferred Study Style",
+   title: "Preferred Study Style",
     content: (
-      <div className="grid grid-cols-3 gap-2">
-        <TextInput
-          label="Style"
+      <div className="grid gap-3">
+        <DropdownSelect
+          label="Preferred Study Style"
+          options={STUDY_STYLE_OPTIONS} // ["Solo","Pair","Group"]
           value={draft.learning?.style || ""}
-          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, style: v } })}
+          onChange={(v) => {
+            // clear hidden fields when style changes
+            const resets =
+              v === "Solo" ? { groupSize: "", frequency: "" } :
+              v === "Pair" ? { groupSize: "" } :
+              {};
+            setDraft({ ...draft, learning: { ...draft.learning, style: v, ...resets } });
+          }}
         />
-        <TextInput
-          label="Group size"
-          value={draft.learning?.groupSize || ""}
-          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })}
-        />
-        <TextInput
-          label="Frequency"
-          value={draft.learning?.frequency || ""}
-          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })}
-        />
+
+        {/* When Solo: show nothing else */}
+        {draft.learning?.style !== "Solo" && (
+          <>
+            {/* When Pair: hide group size; When Group: show it */}
+            {draft.learning?.style === "Group" && (
+              <DropdownSelect
+                label="Preferred Group Size"
+                options={GROUP_SIZE_OPTIONS}
+                value={draft.learning?.groupSize || ""}
+                onChange={(v) =>
+                  setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })
+                }
+              />
+            )}
+
+            {/* Pair & Group both show Frequency */}
+            <DropdownSelect
+              label="Study Availability Frequency"
+              options={FREQUENCY_OPTIONS}
+              value={draft.learning?.frequency || ""}
+              onChange={(v) =>
+                setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })
+              }
+            />
+          </>
+        )}
       </div>
     ),
-  },
+  }
 ];
 
 const steps = isReOnboarding ? stepsRe : stepsFull;
@@ -1524,9 +1582,27 @@ function validateStep(stepTitle: string, d: User, reOnboarding: boolean): string
       return null;
 
     case "Preferred Study Style":
-      if (!isTextFilled(d.learning?.style)) return "Please enter your preferred study style.";
-      if (!isTextFilled(d.learning?.groupSize)) return "Please enter your preferred group size.";
-      if (!isTextFilled(d.learning?.frequency)) return "Please enter your study frequency.";
+      if (!isTextFilled(d.learning?.style))
+    return "Please enter your preferred study style.";
+
+  // Solo: nothing else required
+  if (d.learning?.style === "Solo") return null;
+
+  // Pair: frequency required, group size hidden
+  if (d.learning?.style === "Pair") {
+    if (!isTextFilled(d.learning?.frequency))
+      return "Please enter your study frequency.";
+    return null;
+  }
+
+  // Group: both group size and frequency required
+  if (d.learning?.style === "Group") {
+    if (!isTextFilled(d.learning?.groupSize))
+      return "Please enter your preferred group size.";
+    if (!isTextFilled(d.learning?.frequency))
+      return "Please enter your study frequency.";
+    return null;
+  }
       return null;
 
     default:
@@ -1578,53 +1654,61 @@ function validateStep(stepTitle: string, d: User, reOnboarding: boolean): string
 
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur overflow-y-auto overscroll-contain">
-      <div className="flex min-h-[100svh] items-center justify-center p-4">
-        <div className="w-full max-w-md rounded-3xl bg-white p-6 max-h-[90svh]">
-          <div className="mb-6 flex items-center justify-between">
-            <div>
-              <div className="text-lg font-semibold">{steps[step].title}</div>
-              <div className="text-xs text-neutral-500">Step {step + 1} of {steps.length}</div>
-            </div>
-            <div className="flex gap-1">
-              {steps.map((_, i) => (
-                <div key={i} className={cx("h-2 w-2 rounded-full", i <= step ? "bg-indigo-600" : "bg-neutral-200")} />
-              ))}
-            </div>
+  <div
+    className="fixed inset-0 z-50 bg-black/50 backdrop-blur overflow-y-auto overscroll-contain"
+    onClick={() => setOnboarded(true)} // click outside to close
+    role="dialog"
+    aria-modal="true"
+    >
+    <div className="flex min-h-[100svh] items-center justify-center p-4">
+      <div
+        className="w-full max-w-md rounded-3xl bg-white p-6 max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()} // prevent closing when clicking inside
+      >
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <div className="text-lg font-semibold">{steps[step].title}</div>
+            <div className="text-xs text-neutral-500">Step {step + 1} of {steps.length}</div>
           </div>
-
-          <div className="mb-6 overflow-y-auto max-h-[60svh] pr-1">
-            {steps[step].content}
+          <div className="flex gap-1">
+            {steps.map((_, i) => (
+              <div key={i} className={cx("h-2 w-2 rounded-full", i <= step ? "bg-indigo-600" : "bg-neutral-200")} />
+            ))}
           </div>
+        </div>
 
-          {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
+        <div className="mb-6 overflow-y-auto max-h-[60svh] pr-1">
+          {steps[step].content}
+        </div>
 
-          <div className="flex gap-3">
-            {step > 0 && (
-              <button
-                className={cx(btnBase, "border bg-white")}
-                onClick={() => setStep(step - 1)}
-              >
-                Back
-              </button>
-            )}
+        {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
 
+        <div className="flex gap-3">
+          {step > 0 && (
             <button
-              className={cx(
-                btnBase,
-                "flex-1",
-                canProceed
-                  ? "bg-indigo-600 text-white"
-                  : "bg-neutral-300 text-neutral-500 cursor-not-allowed"
-              )}
-              onClick={next}
-              disabled={!canProceed}
+              className={cx(btnBase, "border bg-white")}
+              onClick={() => setStep(step - 1)}
             >
-              {isLast ? "Complete Setup" : "Next"}
+              Back
             </button>
-          </div>
+          )}
+
+          <button
+            className={cx(
+              btnBase,
+              "flex-1",
+              canProceed
+                ? "bg-indigo-600 text-white"
+                : "bg-neutral-300 text-neutral-500 cursor-not-allowed"
+            )}
+            onClick={next}
+            disabled={!canProceed}
+          >
+            {isLast ? "Complete Setup" : "Next"}
+          </button>
         </div>
       </div>
     </div>
+  </div>
   );
 }
