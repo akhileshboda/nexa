@@ -32,6 +32,51 @@ import Avatar from "./components/Avatar";
 import { btnBase, cardBase, chipBase, cx, TextInput, ChipsInput, ToggleRow } from "./components/UI";
 import logo from "./assets/logo.png";
 
+// ----------------------------------------------------------------------------
+// Fixed Options
+// ----------------------------------------------------------------------------
+const UNI_OPTIONS = [
+  "Monash University", "University of Melbourne", "RMIT", "Deakin",
+  "Swinburne", "La Trobe"
+];
+
+const COURSE_OPTIONS = [
+  "Bachelor of IT", "Computer Science", "Software Engineering",
+  "Data Science", "Cybersecurity", "Information Systems"
+];
+
+const MAJOR_OPTIONS = [
+  "Cybersecurity", "Data Science", "AI/ML", "Networks", "Software Development",
+  "Human-Computer Interaction", "Information Systems", "Business Analytics"
+];
+
+const STUDENT_TYPE_OPTIONS = ["International", "Domestic"];
+
+const ACADEMIC_GOAL_OPTIONS = [
+  "HD average", "Dean's List", "Exchange program", "Publish paper",
+  "Internship", "Graduate program"
+];
+
+const CAREER_ASPIRATION_OPTIONS = [
+  "Software Engineer", "Cyber Analyst", "Product Manager",
+  "Data Scientist", "UX Designer", "Site Reliability Engineer"
+];
+
+const HOBBY_OPTIONS = [
+  "Basketball", "Gym", "Photography", "Gaming",
+  "Cooking", "Reading", "Hiking", "Music"
+];
+
+const AVAILABILITY_OPTIONS = [
+  "Mon AM","Mon PM","Tue AM","Tue PM","Wed AM","Wed PM",
+  "Thu AM","Thu PM","Fri AM","Fri PM","Weekend"
+];
+
+const STUDY_STYLE_OPTIONS = ["Solo", "Pair", "Group"];
+const GROUP_SIZE_OPTIONS = ["2", "3–4", "5+"];
+const FREQUENCY_OPTIONS = ["1× / week", "2× / week", "3× / week", "Daily"];
+
+
 // -----------------------------------------------------------------------------
 // Utilities & Storage
 // -----------------------------------------------------------------------------
@@ -67,6 +112,7 @@ interface User {
   // Home
   homeCountry?: string;
   homeTown?: string;
+  from?: string;
 
   // Education
   uni: string;
@@ -534,6 +580,180 @@ function NavItem({ icon, label, active, onClick }: any) {
   );
 }
 
+function useClickOutside(ref: React.RefObject<HTMLElement>, onAway: () => void) {
+  React.useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (!ref.current) return;
+      if (!ref.current.contains(e.target as Node)) onAway();
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [ref, onAway]);
+}
+
+// SINGLE-SELECT searchable dropdown
+function DropdownSelect({
+  label,
+  options,
+  value,
+  onChange,
+  placeholder = "Search…",
+  emptyText = "No matches",
+}: {
+  label: string;
+  options: string[];
+  value?: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  emptyText?: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState("");
+  const wrapRef = React.useRef<HTMLDivElement>(null);
+  useClickOutside(wrapRef, () => setOpen(false));
+
+  const filtered = React.useMemo(() => {
+    const t = q.trim().toLowerCase();
+    return t ? options.filter(o => o.toLowerCase().includes(t)) : options;
+  }, [q, options]);
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <div className="mb-1 text-xs font-medium text-neutral-700">{label}</div>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full rounded-xl border bg-white px-3 py-2 text-left text-sm"
+      >
+        {value || <span className="text-neutral-400">Select…</span>}
+      </button>
+
+      {open && (
+        <div className="absolute z-40 mt-2 w-full overflow-hidden rounded-xl border bg-white shadow-lg">
+          <div className="p-2">
+            <TextInput value={q} onChange={setQ} placeholder={placeholder} />
+          </div>
+          <div className="max-h-56 overflow-y-auto">
+            {filtered.length === 0 && (
+              <div className="px-3 py-2 text-xs text-neutral-500">{emptyText}</div>
+            )}
+            {filtered.map(opt => (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => { onChange(opt); setOpen(false); setQ(""); }}
+                className={cx(
+                  "block w-full px-3 py-2 text-left text-sm hover:bg-neutral-50",
+                  value === opt && "bg-indigo-50"
+                )}
+              >
+                {opt}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// MULTI-SELECT searchable dropdown
+function DropdownMultiSelect({
+  label,
+  options,
+  value,
+  onChange,
+  placeholder = "Search…",
+  emptyText = "No matches",
+  max,
+}: {
+  label: string;
+  options: string[];
+  value: string[];
+  onChange: (v: string[]) => void;
+  placeholder?: string;
+  emptyText?: string;
+  max?: number;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState("");
+  const wrapRef = React.useRef<HTMLDivElement>(null);
+  useClickOutside(wrapRef, () => setOpen(false));
+
+  const filtered = React.useMemo(() => {
+    const t = q.trim().toLowerCase();
+    return t ? options.filter(o => o.toLowerCase().includes(t)) : options;
+  }, [q, options]);
+
+  const toggle = (opt: string) => {
+    const exists = value.includes(opt);
+    if (exists) onChange(value.filter(v => v !== opt));
+    else {
+      if (max && value.length >= max) return;
+      onChange([...value, opt]);
+    }
+  };
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <div className="mb-1 text-xs font-medium text-neutral-700">{label}</div>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full rounded-xl border bg-white px-3 py-2 text-left text-sm"
+      >
+        {value.length
+          ? <span className="flex flex-wrap gap-1">
+              {value.slice(0, 3).map(v => (
+                <span key={v} className="rounded-full border px-2 py-0.5 text-xs">
+                  {v}
+                </span>
+              ))}
+              {value.length > 3 && <span className="text-xs text-neutral-500">+{value.length - 3}</span>}
+            </span>
+          : <span className="text-neutral-400">Select…</span>}
+      </button>
+
+      {open && (
+        <div className="absolute z-40 mt-2 w-full overflow-hidden rounded-xl border bg-white shadow-lg">
+          <div className="p-2">
+            <TextInput value={q} onChange={setQ} placeholder={placeholder} />
+          </div>
+          <div className="max-h-56 overflow-y-auto">
+            {filtered.length === 0 && (
+              <div className="px-3 py-2 text-xs text-neutral-500">{emptyText}</div>
+            )}
+            {filtered.map(opt => {
+              const selected = value.includes(opt);
+              return (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => toggle(opt)}
+                  className={cx(
+                    "flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-neutral-50"
+                  )}
+                >
+                  <span>{opt}</span>
+                  {selected && <Check className="h-4 w-4 text-indigo-600" />}
+                </button>
+              );
+            })}
+          </div>
+          {max && (
+            <div className="border-t px-3 py-1.5 text-[11px] text-neutral-500">
+              {value.length}/{max} selected
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
 function HomeScreen({ me, setTab, likes, topCandidate, onboarded, setOnboarded }: any) {
   return (
     <div className="space-y-4">
@@ -987,102 +1207,105 @@ const stepsFull = [
   {
     title: "Education",
     content: (
-      <div className="grid grid-cols-2 gap-2">
-        <TextInput
+      <div className="grid gap-3">
+        <DropdownSelect
           label="University"
-          value={draft.uni || ""}
-          onChange={(v: string) => setDraft({ ...draft, uni: v })}
-          placeholder="e.g., Monash University"
+          options={UNI_OPTIONS}
+          value={draft.uni}
+          onChange={(v) => setDraft({ ...draft, uni: v })}
+          placeholder="Search universities…"
         />
-        <TextInput
+        <DropdownSelect
           label="Course"
-          value={draft.course || ""}
-          onChange={(v: string) => setDraft({ ...draft, course: v })}
-          placeholder="e.g., Bachelor of IT"
+          options={COURSE_OPTIONS}
+          value={draft.course}
+          onChange={(v) => setDraft({ ...draft, course: v })}
+          placeholder="Search courses…"
         />
-        <TextInput
+        <DropdownSelect
           label="Major"
+          options={MAJOR_OPTIONS}
           value={draft.major || ""}
-          onChange={(v: string) => setDraft({ ...draft, major: v })}
-          placeholder="e.g., Cybersecurity / Data Science"
+          onChange={(v) => setDraft({ ...draft, major: v })}
+          placeholder="Search majors…"
         />
-        <TextInput
+        <DropdownSelect
           label="Student Type"
-          value={draft.studentType || ""}
-          onChange={(v: string) =>
-            setDraft({ ...draft, studentType: (v === "International" || v === "Domestic") ? v as any : v as any })
-          }
-          placeholder="International / Domestic"
+          options={STUDENT_TYPE_OPTIONS}
+          value={draft.studentType}
+          onChange={(v) => setDraft({ ...draft, studentType: v as any })}
         />
       </div>
+
     ),
   },
   {
     title: "Academic Goals",
     content: (
-      <ChipsInput
-        autoFocus
-        label="What are your academic goals?"
-        value={draft.academicGoals || []}
-        onChange={(v: string[]) => setDraft({ ...draft, academicGoals: v })}
-        placeholder="e.g., HD average, publish paper, exchange program"
-      />
+      <DropdownMultiSelect
+      label="Academic Goals"
+      options={ACADEMIC_GOAL_OPTIONS}
+      value={draft.academicGoals || []}
+      onChange={(v) => setDraft({ ...draft, academicGoals: v })}
+        />
     ),
   },
   {
     title: "Career Aspirations",
     content: (
-      <ChipsInput
+      <DropdownMultiSelect
         label="Your career aspirations"
+        options={CAREER_ASPIRATION_OPTIONS}
         value={draft.careerAspirations || []}
-        onChange={(v: string[]) => setDraft({ ...draft, careerAspirations: v })}
-        placeholder="e.g., Cyber analyst, Front-end dev, Product manager"
+        onChange={(v) => setDraft({ ...draft, careerAspirations: v })}
       />
     ),
   },
   {
     title: "Hobbies",
     content: (
-      <ChipsInput
-        label="What do you enjoy?"
+      <DropdownMultiSelect
+        label="Hobbies"
+        options={HOBBY_OPTIONS}
         value={draft.hobbies || []}
-        onChange={(v: string[]) => setDraft({ ...draft, hobbies: v })}
-        placeholder="e.g., Basketball, Lifting, Photography, Cooking"
+        onChange={(v) => setDraft({ ...draft, hobbies: v })}
+        placeholder="Filter hobbies…"
       />
     ),
   },
   {
     title: "Study Availability",
     content: (
-      <ChipsInput
-        label="When are you generally available to study?"
+      <DropdownMultiSelect
+        label="Study Availability"
+        options={AVAILABILITY_OPTIONS}
         value={draft.availability || []}
-        onChange={(v: string[]) => setDraft({ ...draft, availability: v })}
-        placeholder="e.g., Mon AM, Tue PM, Weekend"
+        onChange={(v) => setDraft({ ...draft, availability: v })}
+        placeholder="Filter times…"
       />
     ),
   },
   {
     title: "Preferred Study Style",
     content: (
-      <div className="grid grid-cols-3 gap-2">
-        <TextInput
-          label="Style"
+      <div className="grid gap-3">
+        <DropdownSelect
+          label="Preferred Study Style"
+          options={STUDY_STYLE_OPTIONS}
           value={draft.learning?.style || ""}
-          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, style: v } })}
-          placeholder="Solo / Group / Pair"
+          onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, style: v } })}
         />
-        <TextInput
-          label="Group size"
+        <DropdownSelect
+          label="Preferred Group Size"
+          options={GROUP_SIZE_OPTIONS}
           value={draft.learning?.groupSize || ""}
-          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })}
-          placeholder="2 / 3–4 / 5+"
+          onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })}
         />
-        <TextInput
-          label="Frequency"
+        <DropdownSelect
+          label="Study Availability Frequency"
+          options={FREQUENCY_OPTIONS}
           value={draft.learning?.frequency || ""}
-          onChange={(v: string) => setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })}
-          placeholder="e.g., 2× per week"
+          onChange={(v) => setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })}
         />
       </div>
     ),
@@ -1094,33 +1317,39 @@ const stepsRe = [
   {
     title: "Education",
     content: (
-      <div className="grid grid-cols-2 gap-2">
-        <TextInput
-          autoFocus
-          label="University"
-          value={draft.uni || ""}
-          onChange={(v: string) => setDraft({ ...draft, uni: v })}
-        />
-        <TextInput
-          label="Course"
-          value={draft.course || ""}
-          onChange={(v: string) => setDraft({ ...draft, course: v })}
-        />  
-        <TextInput
-          label="Major"
-          value={draft.major || ""}
-          onChange={(v: string) => setDraft({ ...draft, major: v })}
-          placeholder="e.g., Cybersecurity / Data Science"
-        />
-        <TextInput
-          label="Student Type"
-          value={draft.studentType || ""}
-          onChange={(v: string) =>
-            setDraft({ ...draft, studentType: (v === "International" || v === "Domestic") ? v as any : v as any })
-          }
-          placeholder="International / Domestic"
-        />
-      </div>
+      <div className="grid gap-3">
+      <DropdownSelect
+        label="University"
+        options={UNI_OPTIONS}
+        value={draft.uni}
+        onChange={(v) => setDraft({ ...draft, uni: v })}
+        placeholder="Search universities..."
+      />
+
+      <DropdownSelect
+        label="Course"
+        options={COURSE_OPTIONS}
+        value={draft.course}
+        onChange={(v) => setDraft({ ...draft, course: v })}
+        placeholder="Search courses..."
+      />
+
+      <DropdownSelect
+        label="Major"
+        options={MAJOR_OPTIONS}
+        value={draft.major || ""}
+        onChange={(v) => setDraft({ ...draft, major: v })}
+        placeholder="Search majors..."
+      />
+
+      <DropdownSelect
+        label="Student Type"
+        options={["International", "Domestic"]}
+        value={draft.studentType}
+        onChange={(v) => setDraft({ ...draft, studentType: v as any })}
+      />
+    </div>
+
     ),
   },
   {
@@ -1213,6 +1442,7 @@ function validateStep(stepTitle: string, d: User, reOnboarding: boolean): string
     case "Education":
       if (!isTextFilled(d.uni)) return "Please enter your university.";
       if (!isTextFilled(d.course)) return "Please enter your course.";
+      if (!isTextFilled(d.major)) return "Please enter your major.";
       if (!isTextFilled(d.studentType)) return "Please specify if you are an International or Domestic student.";
       return null;
 
@@ -1516,9 +1746,9 @@ function AuthScreenWithSupabase({ onSignIn, onRegister }: any) {
 
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur">
-      <div className="flex min-h-[100dvh] items-center justify-center p-4">
-        <div className="w-full max-w-md rounded-3xl bg-white p-6">
+    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur overflow-y-auto overscroll-contain">
+      <div className="flex min-h-[100svh] items-center justify-center p-4">
+        <div className="w-full max-w-md rounded-3xl bg-white p-6 max-h-[90svh]">
           <div className="mb-6 flex items-center justify-between">
             <div>
               <div className="text-lg font-semibold">{steps[step].title}</div>
@@ -1531,7 +1761,9 @@ function AuthScreenWithSupabase({ onSignIn, onRegister }: any) {
             </div>
           </div>
 
-          <div className="mb-6">{steps[step].content}</div>
+          <div className="mb-6 overflow-y-auto max-h-[60svh] pr-1">
+            {steps[step].content}
+          </div>
 
           {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
 
