@@ -4,6 +4,7 @@ import {
   PersonStanding,
   MessagesSquare,
   Calendar as CalendarIcon,
+  CalendarCheck,
   User as UserIcon,
   X,
   Check,
@@ -23,12 +24,13 @@ import {
 
 import { supabase } from "./lib/supabase"; // make sure this exists
 // 👇 expose it for debugging in the browser console
-;(window as any).supabase = supabase;
+; (window as any).supabase = supabase;
 
 import AuthScreen from "./components/AuthScreen";
 import Avatar from "./components/Avatar";
 import { btnBase, cardBase, chipBase, cx, TextInput, ChipsInput, ToggleRow } from "./components/UI";
 import logo from "./assets/logo.png";
+import { fetchEvents, type EventUI } from "./services/events/service";
 
 export async function sendTestMessage(groupId: string) {
   const { data: s } = await supabase.auth.getSession();
@@ -48,7 +50,7 @@ export async function sendTestMessage(groupId: string) {
 }
 
 // Attach it to window so you can call it from the browser console
-;(window as any).sendTestMessage = sendTestMessage;
+; (window as any).sendTestMessage = sendTestMessage;
 
 
 // ----------------------------------------------------------------------------
@@ -87,8 +89,8 @@ const HOBBY_OPTIONS = [
 ];
 
 const AVAILABILITY_OPTIONS = [
-  "Mon AM","Mon PM","Tue AM","Tue PM","Wed AM","Wed PM",
-  "Thu AM","Thu PM","Fri AM","Fri PM","Weekend"
+  "Mon AM", "Mon PM", "Tue AM", "Tue PM", "Wed AM", "Wed PM",
+  "Thu AM", "Thu PM", "Fri AM", "Fri PM", "Weekend"
 ];
 
 const STUDY_STYLE_OPTIONS = ["Solo", "Pair", "Group"];
@@ -136,7 +138,7 @@ interface User {
   // Education
   uni: string;
   course: string;
-  major?: string;       
+  major?: string;
   year: number;
   studentType?: "International" | "Domestic";
 
@@ -167,7 +169,7 @@ interface User {
   seed?: number;
 }
 
-interface Event {
+interface EventItem {
   id: string;
   title: string;
   time: string;
@@ -265,7 +267,7 @@ const SAMPLE_PROFILES: User[] = [
   },
 ];
 
-const SAMPLE_EVENTS: Event[] = [
+const SAMPLE_EVENTS: EventItem[] = [
   {
     id: "e1",
     title: "Women in Cyber – Blue Team 101",
@@ -430,6 +432,9 @@ export default function App() {
   const [likes, setLikes] = useState(() => storage.get("nexa_likes", []));
   const [skips, setSkips] = useState(() => storage.get("nexa_skips", []));
   const [filters, setFilters] = useState<string[]>([]); // event tags
+  // My Supabase user id (for RSVP) and modal visibility
+  const [myId, setMyId] = useState<string | null>(null);
+  const [myEventsOpen, setMyEventsOpen] = useState(false);
 
   // 🔹 Auth state
   const [authed, setAuthed] = useState(() => storage.get("nexa_authed", false));
@@ -442,6 +447,29 @@ export default function App() {
   useEffect(() => storage.set("nexa_onboarded", onboarded), [onboarded]);
   useEffect(() => storage.set("nexa_likes", likes), [likes]);
   useEffect(() => storage.set("nexa_skips", skips), [skips]);
+
+  // Events
+  // import the type EventUI (see fix #2)
+  const [events, setEvents] = useState<EventUI[]>([]);
+
+  async function refreshEvents() {
+    try {
+      const fresh = await fetchEvents();
+      setEvents(fresh);
+    } catch (e) {
+      console.error("refreshEvents failed", e);
+    }
+  }
+
+  useEffect(() => { refreshEvents(); }, []);
+
+  useEffect(() => {
+    fetchEvents()
+      .then(setEvents)
+      .catch((err) => console.error("Failed to fetch events", err));
+  }, []);
+
+
 
   // 🔹 User registry management
   const getUsers = () => storage.get("nexa_users", []);
@@ -471,6 +499,10 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    getMyUserId().then(setMyId);
+  }, [authed]);
+
   // Put me in user_directory so others can find me by email
   useEffect(() => {
     async function upsertDirectory() {
@@ -483,6 +515,7 @@ export default function App() {
     }
     if (authed) upsertDirectory();
   }, [authed]);
+
 
 
   // 🔹 Sign in
@@ -528,6 +561,54 @@ export default function App() {
     resetDemo();
   }
 
+  async function handleRSVP(eventId: string) {
+  const uid = await getMyUserId();
+  if (!uid) { alert("Please sign in to RSVP."); return; }
+
+  const { error } = await supabase
+    .from("event_attendees")
+    .upsert(
+      { event_id: eventId, user_id: uid },
+      { onConflict: "event_id,user_id", ignoreDuplicates: true }
+    );
+
+  if (error) { console.error("RSVP failed:", error.message); alert("Sorry, RSVP failed."); return; }
+
+  // optimistic UI
+  setEvents(prev =>
+    prev.map(ev => ev.id === eventId
+      ? { ...ev, attendees: Array.from(new Set([...(ev.attendees || []), uid])) }
+      : ev));
+
+  // sync with DB
+  await refreshEvents();
+}
+
+async function handleCancelRSVP(eventId: string) {
+  const uid = await getMyUserId();
+  if (!uid) { alert("Please sign in to update your RSVP."); return; }
+
+  const { error } = await supabase
+    .from("event_attendees")
+    .delete()
+    .eq("event_id", eventId)
+    .eq("user_id", uid);
+
+  if (error) { console.error("Cancel RSVP failed:", error.message); alert("Sorry, we couldn’t cancel your RSVP."); return; }
+
+  // optimistic UI
+  setEvents(prev =>
+    prev.map(ev => ev.id === eventId
+      ? { ...ev, attendees: (ev.attendees || []).filter(id => id !== uid) }
+      : ev));
+
+  // sync with DB
+  await refreshEvents();
+}
+
+
+
+
   // 🔹 Helpers
   const pool = useMemo(() => SAMPLE_PROFILES, []);
   const likedUsers = pool.filter((p) => likes.includes(p.id));
@@ -568,7 +649,6 @@ export default function App() {
     setOnboarded(false);
     setLikes([]);
     setSkips([]);
-    setCurrentChat(null);
     setTab("home");
   }
 
@@ -592,6 +672,13 @@ export default function App() {
                 onClick={() => alert("Notifications are simulated in this MVP.")}
               >
                 <Bell className="h-4 w-4" />
+              </button>
+              <button
+                className={cx(btnBase, "border bg-white")}
+                onClick={() => setMyEventsOpen(true)}
+                title="My Events"
+              >
+                <CalendarCheck className="h-4 w-4" />
               </button>
               <button className={cx(btnBase, "border bg-white")} onClick={handleLogout}>
                 <LogOut className="h-4 w-4" />
@@ -628,10 +715,13 @@ export default function App() {
           {tab === "events" && (
             <EventsScreen
               pool={pool}
-              events={SAMPLE_EVENTS}
+              events={events}          // ✅ new
               filters={filters}
               setFilters={setFilters}
               me={me}
+              myId={myId}
+              onRSVP={handleRSVP}
+              onCancelRSVP={handleCancelRSVP}
             />
           )}
           {tab === "profile" && (
@@ -650,6 +740,74 @@ export default function App() {
           </div>
         </nav>
       </div>
+
+      {/* My Events modal */}
+      {myEventsOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur"
+          onClick={() => setMyEventsOpen(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="flex min-h-[100svh] items-center justify-center p-4">
+            <div
+              className="w-full max-w-md rounded-3xl bg-white p-6 max-h-[90vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-4 flex items-center justify-between">
+                <div className="text-lg font-semibold">My Events</div>
+                <button
+                  className={cx(btnBase, "border bg-white")}
+                  onClick={() => setMyEventsOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+
+              {!myId ? (
+                <div className="text-sm text-neutral-600">Sign in to see your RSVPs.</div>
+              ) : (
+                <>
+                  {events.filter((ev) => (ev.attendees || []).includes(myId)).length === 0 ? (
+                    <div className="text-sm text-neutral-600">
+                      You haven’t RSVP’d to anything yet.
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {events
+                        .filter((ev) => (ev.attendees || []).includes(myId))
+                        .map((e) => (
+                          <div key={e.id} className="rounded-xl border bg-white p-4">
+                            <div className="text-sm font-semibold truncate">{e.title}</div>
+                            <div className="grid grid-cols-2 gap-4">
+                            <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-neutral-600">
+                              <span className="inline-flex items-center gap-1">
+                                <Clock className="h-3.5 w-3.5" /> {e.time}
+                              </span>
+                              <span className="inline-flex items-center gap-1">
+                                <MapPin className="h-3.5 w-3.5" /> {e.location}
+                              </span>                      
+                            </div>
+                            {/* Cancel RSVP button */}
+                              <div className="mt-3">
+                                <button
+                                  className="w-full rounded-lg border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50"
+                                  onClick={() => handleCancelRSVP(e.id)}
+                                >
+                                  Cancel RSVP
+                                </button>
+                                </div>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Onboarding overlay */}
       {!onboarded && <Onboarding me={me} setMe={setMe} setOnboarded={setOnboarded} />}
@@ -804,13 +962,13 @@ function DropdownMultiSelect({
       >
         {value.length
           ? <span className="flex flex-wrap gap-1">
-              {value.slice(0, 3).map(v => (
-                <span key={v} className="rounded-full border px-2 py-0.5 text-xs">
-                  {v}
-                </span>
-              ))}
-              {value.length > 3 && <span className="text-xs text-neutral-500">+{value.length - 3}</span>}
-            </span>
+            {value.slice(0, 3).map(v => (
+              <span key={v} className="rounded-full border px-2 py-0.5 text-xs">
+                {v}
+              </span>
+            ))}
+            {value.length > 3 && <span className="text-xs text-neutral-500">+{value.length - 3}</span>}
+          </span>
           : <span className="text-neutral-400">Select…</span>}
       </button>
 
@@ -985,7 +1143,7 @@ function MatchScreen({ me, candidate, onLike, onSkip, likedUsers, suggestGroup }
 
       {/* Group suggestion */}
       <div className={cardBase}>
-        <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><Users className="h-4 w-4"/> Suggested Study Group</div>
+        <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><Users className="h-4 w-4" /> Suggested Study Group</div>
         {group.length ? (
           <div className="space-y-3">
             {group.map((p: any) => (
@@ -1034,7 +1192,7 @@ function ProfileCard({ profile, }: any) {
             <div className="truncate text-sm font-semibold">{profile.name}</div>
           </div>
           <div className="mt-0.5 text-xs text-neutral-600">
-            <span className="inline-flex items-center gap-1"><GraduationCap className="h-3.5 w-3.5"/> {profile.course}</span>
+            <span className="inline-flex items-center gap-1"><GraduationCap className="h-3.5 w-3.5" /> {profile.course}</span>
             <span className="mx-1">•</span>
             <span>Y{profile.year}</span>
           </div>
@@ -1052,10 +1210,10 @@ function ProfileCard({ profile, }: any) {
             </ul>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-neutral-600">
-            <MapPin className="h-3.5 w-3.5"/>
+            <MapPin className="h-3.5 w-3.5" />
             {profile.from} • {profile.uni}
             <span className="mx-1">•</span>
-            <Clock className="h-3.5 w-3.5"/>
+            <Clock className="h-3.5 w-3.5" />
             Availability: {profile.availability.join(", ")}
           </div>
         </div>
@@ -1235,75 +1393,248 @@ function ChatBox({
 }
 
 
-function EventsScreen({ pool, events, filters, setFilters, me }: any) {
+function EventsScreen({ events, filters, setFilters, onRSVP, onCancelRSVP, myId }: {
+  events: EventUI[];
+  filters: string[];
+  setFilters: (v: string[]) => void;
+  onRSVP: (id: string) => void;
+  onCancelRSVP: (id: string) => void; 
+  myId: string | null;
+}) {
+  const [sourceFilters, setSourceFilters] = React.useState<string[]>([]);
+
   const toggleTag = (t: string) =>
-    setFilters((prev: string[]) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
-  const allTags = Array.from(new Set(events.flatMap((e: Event) => e.tags)));
-  const visible = events.filter((e: Event) => (filters.length ? e.tags.some((t) => filters.includes(t)) : true));
+    setFilters((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
+
+  const toggleSource = (s: string) =>
+    setSourceFilters((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+
+  const amGoing = React.useCallback(
+  (ev: EventUI) => Boolean(myId && (ev.attendees || []).includes(myId)),
+  [myId]
+);
+
+  // Sources (+counts) from all events
+  const availableSources = React.useMemo(() => {
+    const m = new Map<string, number>();
+    (events || []).forEach((e) => {
+      const key = (e.source || "Other").trim();
+      m.set(key, (m.get(key) || 0) + 1);
+    });
+    return Array.from(m.entries()).sort((a, b) =>
+      b[1] === a[1] ? a[0].localeCompare(b[0]) : b[1] - a[1]
+    );
+  }, [events]);
+
+  // Apply tag filter
+  const byTag = React.useMemo(() => {
+    if (!filters.length) return events || [];
+    return (events || []).filter((e) => (e.tags || []).some((t) => filters.includes(t)));
+  }, [events, filters]);
+
+  // Apply source filter
+  const bySource = React.useMemo(() => {
+    if (!sourceFilters.length) return byTag;
+    return byTag.filter((e) => sourceFilters.includes((e.source || "Other").trim()));
+  }, [byTag, sourceFilters]);
+
+  // Hide RSVP'd events
+  const visible = React.useMemo(() => {
+    if (!myId) return bySource;
+    return bySource.filter((e) => !((e.attendees || []) as string[]).includes(myId));
+  }, [bySource, myId]);
+
+  // Sources from the CURRENT visible feed (not all events)
+  const visibleSources = React.useMemo(() => {
+    const m = new Map<string, number>();
+    (visible as EventUI[]).forEach((e) => {
+      const key = (e.source || "Other").trim();
+      m.set(key, (m.get(key) || 0) + 1);
+    });
+    return Array.from(m.entries()).sort((a, b) =>
+      b[1] === a[1] ? a[0].localeCompare(b[0]) : b[1] - a[1]
+    );
+  }, [visible]);
+
+  // If a selected source no longer exists in the visible set, prune it
+  React.useEffect(() => {
+    setSourceFilters((prev) => prev.filter((s) => visibleSources.some(([src]) => src === s)));
+  }, [visibleSources]);
+
+
+  // Tags that exist in the CURRENT visible feed
+  const visibleTags = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (visible as EventUI[]).flatMap((e) => (Array.isArray(e.tags) ? e.tags : []))
+        )
+      ).sort((a, b) => a.localeCompare(b)),
+    [visible]
+  );
+
+  // If a selected tag disappears from the visible set, prune it
+  React.useEffect(() => {
+    setFilters((prev) => prev.filter((t) => visibleTags.includes(t)));
+  }, [visibleTags, setFilters]);
 
   return (
     <div className="space-y-4">
       <div className={cardBase}>
         <div className="mb-2 flex items-center justify-between">
-          <div className="text-sm font-semibold">Event Central</div>
-          <button className={cx(btnBase, "border bg-white text-xs")} onClick={() => alert("Opens external event source; we aggregate only.")}>
-            <Filter className="mr-1 h-3.5 w-3.5"/> Sources
-          </button>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {allTags.map((t: string) => (
-            <button
-              key={t}
-              className={cx(chipBase, filters.includes(t) ? "border-indigo-500 bg-indigo-50" : "border-neutral-200 bg-white")}
-              onClick={() => toggleTag(t)}
-            >
-              {t}
-            </button>
-          ))}
-          {filters.length > 0 && (
-            <button className={cx(chipBase, "border-neutral-200 bg-white")} onClick={() => setFilters([])}>Clear</button>
-          )}
-        </div>
-      </div>
-
-      {visible.map((e: Event) => (
-        <div key={e.id} className={cardBase}>
-          <div className="flex items-start gap-3">
-            <div className="grid h-10 w-10 place-items-center rounded-xl bg-neutral-900 text-white text-xs font-bold">
-              {e.time.split(",")[0]}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-semibold">{e.title}</div>
-              <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-neutral-600">
-                <span className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5"/> {e.time}</span>
-                <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5"/> {e.location}</span>
-                <span className="inline-flex items-center gap-1"><CalendarIcon className="h-3.5 w-3.5"/> {e.source}</span>
-              </div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {e.tags.map((t: string) => (
-                  <span key={t} className={cx(chipBase, "border-neutral-200 bg-white")}>
-                    {t}
-                  </span>
-                ))}
-              </div>
-              <div className="mt-3 text-xs text-neutral-600">
-                {e.attendees.length ? (
-                  <>Friends going: {e.attendees.map((id: string) => pool.find((p: any) => p.id === id)?.name).filter(Boolean).join(", ")}</>
-                ) : (
-                  <>No friends going yet. Be the first!</>
-                )}
-              </div>
-              <div className="mt-3 flex gap-2">
-                <button className={cx(btnBase, "border bg-white")}>Open Source</button>
-                <button className={cx(btnBase, "bg-neutral-900 text-white")} onClick={() => alert("In a full build, this RSVPs and shares to your group.")}>I'm interested</button>
-              </div>
+          <div>
+            <div className="text-sm font-semibold">Event Central</div>
+            <div className="text-xs text-neutral-500">
+              {events.length} total • {visible.length} showing
+              {filters.length ? ` • ${filters.length} tag${filters.length > 1 ? "s" : ""} applied` : ""}
+              {sourceFilters.length ? ` • ${sourceFilters.length} source${sourceFilters.length > 1 ? "s" : ""} applied` : ""}
             </div>
           </div>
         </div>
-      ))}
+
+        {/* Source filters (only when the visible feed has sources) */}
+        {visibleSources.length > 0 && (
+          <div className="mb-3">
+            <div className="mb-1 text-[11px] font-medium text-neutral-600">Sources</div>
+            <div className="flex flex-wrap gap-2">
+              {visibleSources.map(([src, count]) => {
+                const active = sourceFilters.includes(src);
+                return (
+                  <button
+                    key={src}
+                    className={cx(
+                      chipBase,
+                      active ? "border-indigo-500 bg-indigo-50" : "border-neutral-200 bg-white"
+                    )}
+                    onClick={() => toggleSource(src)}
+                    title={`${count} event${count === 1 ? "" : "s"}`}
+                  >
+                    {src} <span className="ml-1 opacity-70">({count})</span>
+                  </button>
+                );
+              })}
+              {sourceFilters.length > 0 && (
+                <button
+                  className={cx(chipBase, "border-neutral-200 bg-white")}
+                  onClick={() => setSourceFilters([])}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+
+        {/* Tag filters (only when tags exist in the current feed) */}
+        {visibleTags.length > 0 && (
+          <div className="mb-3">
+            <div className="mb-1 text-[11px] font-medium text-neutral-600">Tags</div>
+            <div className="flex flex-wrap gap-2">
+              {visibleTags.map((t) => {
+                const active = filters.includes(t);
+                return (
+                  <button
+                    key={t}
+                    className={cx(
+                      chipBase,
+                      active ? "border-indigo-500 bg-indigo-50" : "border-neutral-200 bg-white"
+                    )}
+                    onClick={() => toggleTag(t)}
+                  >
+                    {t}
+                  </button>
+                );
+              })}
+              {filters.length > 0 && (
+                <button
+                  className={cx(chipBase, "border-neutral-200 bg-white")}
+                  onClick={() => setFilters([])}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+      {/* Event cards / empty state */}
+        {visible.length === 0 ? (
+          <div className={cx(cardBase, "mt-6")}>
+            <div className="text-sm text-neutral-600">No new events nearby.</div>
+          </div>
+        ) : (
+          <>
+            {visible.map((e: EventUI) => (
+              <div key={e.id} className={cardBase}>
+                <div className="flex items-start gap-3">
+                  <div className="grid h-10 w-10 place-items-center rounded-xl bg-neutral-900 text-white text-xs font-bold">
+                    <CalendarIcon className="h-4 w-4 opacity-90" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold">{e.title}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-neutral-600">
+                      <span className="inline-flex items-center gap-1">
+                        <Clock className="h-3.5 w-3.5" /> {e.time}
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <MapPin className="h-3.5 w-3.5" /> {e.location}
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <CalendarIcon className="h-3.5 w-3.5" /> {e.source}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2 pb-2.5">
+                      {(e.tags || []).map((t) => (
+                        <span key={t} className={cx(chipBase, "border-neutral-200 bg-white")}>
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="mt-4 flex gap-3">
+                      {amGoing(e) ? (
+                        <>
+                          <button
+                            className="flex-1 rounded-lg bg-neutral-200 text-neutral-700 px-4 py-2 text-sm font-medium cursor-default"
+                            aria-disabled
+                          >
+                            Going
+                          </button>
+                          <button
+                            className="flex-1 rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50"
+                            onClick={() => onCancelRSVP(e.id)}
+                          >
+                            Cancel RSVP
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            className="flex-1 rounded-lg bg-neutral-900 text-white px-4 py-2 text-sm font-medium"
+                            onClick={() => onRSVP(e.id)}
+                          >
+                            I’m interested
+                          </button>
+                          <button
+                            className="flex-1 rounded-lg border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+                            onClick={() => {/* optional info click */ }}
+                          >
+                            View Info
+                          </button>
+                        </>
+                      )}
+                    </div>
+
+                  </div>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
     </div>
   );
 }
+
 
 function ProfileScreen({ me, setMe, setOnboarded }: any) {
   const [editing, setEditing] = useState(false);
@@ -1394,437 +1725,437 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") setOnboarded(true); // close modal
-  };
-  window.addEventListener("keydown", onKey);
-  return () => window.removeEventListener("keydown", onKey);
-}, [setOnboarded]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOnboarded(true); // close modal
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setOnboarded]);
 
 
-function isTextFilled(v?: string) {
-  return typeof v === "string" && v.trim().length > 0;
-}
-function isListFilled(v?: string[]) {
-  return Array.isArray(v) && v.length > 0;
-}
+  function isTextFilled(v?: string) {
+    return typeof v === "string" && v.trim().length > 0;
+  }
+  function isListFilled(v?: string[]) {
+    return Array.isArray(v) && v.length > 0;
+  }
 
-const [draft, setDraft] = useState<User>(me);
+  const [draft, setDraft] = useState<User>(me);
 
-// Heuristic: if first/last name already exist, treat this pass as re-onboarding
-const isReOnboarding =
-  Boolean(me?.firstName || me?.lastName || (me?.academicGoals?.length || 0) > 0);
+  // Heuristic: if first/last name already exist, treat this pass as re-onboarding
+  const isReOnboarding =
+    Boolean(me?.firstName || me?.lastName || (me?.academicGoals?.length || 0) > 0);
 
-// ---- Full Onboarding ----
-const stepsFull = [
-  {
-    title: "Welcome to Nexa",
-    content: (
-      <p className="text-sm text-neutral-700">
-        Let's set up your profile to find compatible study buddies and small groups. This takes about a minute.
-      </p>
-    ),
-  },
-  {
-    title: "About You",
-    content: (
-      <div className="grid grid-cols-2 gap-2">
-        <TextInput
-          autoFocus
-          label="First Name"
-          value={draft.firstName || ""}
-          onChange={(v: string) => setDraft({ ...draft, firstName: v })}
-          placeholder="e.g., Alex"
-        />
-        <TextInput
-          label="Last Name"
-          value={draft.lastName || ""}
-          onChange={(v: string) => setDraft({ ...draft, lastName: v })}
-          placeholder="e.g., Nguyen"
-        />
-        <TextInput
-          label="DOB (dd/MM/yyyy)"
-          value={draft.dob || ""}
-          onChange={(v: string) => setDraft({ ...draft, dob: v })}
-          placeholder="31/12/2003"
-        />
-      </div>
-    ),
-  },
-  {
-    title: "Home",
-    content: (
-      <div className="grid grid-cols-2 gap-2">
-        <TextInput
-          label="Home Country"
-          value={draft.homeCountry || ""}
-          onChange={(v: string) => setDraft({ ...draft, homeCountry: v })}
-          placeholder="e.g., Australia"
-        />
-        <TextInput
-          label="Home Town"
-          value={draft.homeTown || ""}
-          onChange={(v: string) => setDraft({ ...draft, homeTown: v })}
-          placeholder="e.g., Melbourne"
-        />
-      </div>
-    ),
-  },
-  {
-    title: "Education",
-    content: (
-      <div className="grid gap-3">
-        <DropdownSelect
-          label="University"
-          options={UNI_OPTIONS}
-          value={draft.uni}
-          onChange={(v) => setDraft({ ...draft, uni: v })}
-          placeholder="Search universities…"
-        />
-        <DropdownSelect
-          label="Course"
-          options={COURSE_OPTIONS}
-          value={draft.course}
-          onChange={(v) => setDraft({ ...draft, course: v })}
-          placeholder="Search courses…"
-        />
-        <DropdownSelect
-          label="Major"
-          options={MAJOR_OPTIONS}
-          value={draft.major || ""}
-          onChange={(v) => setDraft({ ...draft, major: v })}
-          placeholder="Search majors…"
-        />
-        <DropdownSelect
-          label="Student Type"
-          options={STUDENT_TYPE_OPTIONS}
-          value={draft.studentType}
-          onChange={(v) => setDraft({ ...draft, studentType: v as any })}
-        />
-      </div>
+  // ---- Full Onboarding ----
+  const stepsFull = [
+    {
+      title: "Welcome to Nexa",
+      content: (
+        <p className="text-sm text-neutral-700">
+          Let's set up your profile to find compatible study buddies and small groups. This takes about a minute.
+        </p>
+      ),
+    },
+    {
+      title: "About You",
+      content: (
+        <div className="grid grid-cols-2 gap-2">
+          <TextInput
+            autoFocus
+            label="First Name"
+            value={draft.firstName || ""}
+            onChange={(v: string) => setDraft({ ...draft, firstName: v })}
+            placeholder="e.g., Alex"
+          />
+          <TextInput
+            label="Last Name"
+            value={draft.lastName || ""}
+            onChange={(v: string) => setDraft({ ...draft, lastName: v })}
+            placeholder="e.g., Nguyen"
+          />
+          <TextInput
+            label="DOB (dd/MM/yyyy)"
+            value={draft.dob || ""}
+            onChange={(v: string) => setDraft({ ...draft, dob: v })}
+            placeholder="31/12/2003"
+          />
+        </div>
+      ),
+    },
+    {
+      title: "Home",
+      content: (
+        <div className="grid grid-cols-2 gap-2">
+          <TextInput
+            label="Home Country"
+            value={draft.homeCountry || ""}
+            onChange={(v: string) => setDraft({ ...draft, homeCountry: v })}
+            placeholder="e.g., Australia"
+          />
+          <TextInput
+            label="Home Town"
+            value={draft.homeTown || ""}
+            onChange={(v: string) => setDraft({ ...draft, homeTown: v })}
+            placeholder="e.g., Melbourne"
+          />
+        </div>
+      ),
+    },
+    {
+      title: "Education",
+      content: (
+        <div className="grid gap-3">
+          <DropdownSelect
+            label="University"
+            options={UNI_OPTIONS}
+            value={draft.uni}
+            onChange={(v) => setDraft({ ...draft, uni: v })}
+            placeholder="Search universities…"
+          />
+          <DropdownSelect
+            label="Course"
+            options={COURSE_OPTIONS}
+            value={draft.course}
+            onChange={(v) => setDraft({ ...draft, course: v })}
+            placeholder="Search courses…"
+          />
+          <DropdownSelect
+            label="Major"
+            options={MAJOR_OPTIONS}
+            value={draft.major || ""}
+            onChange={(v) => setDraft({ ...draft, major: v })}
+            placeholder="Search majors…"
+          />
+          <DropdownSelect
+            label="Student Type"
+            options={STUDENT_TYPE_OPTIONS}
+            value={draft.studentType}
+            onChange={(v) => setDraft({ ...draft, studentType: v as any })}
+          />
+        </div>
 
-    ),
-  },
-  {
-    title: "Academic Goals",
-    content: (
-      <DropdownMultiSelect
-      label="Academic Goals"
-      options={ACADEMIC_GOAL_OPTIONS}
-      value={draft.academicGoals || []}
-      onChange={(v) => setDraft({ ...draft, academicGoals: v })}
+      ),
+    },
+    {
+      title: "Academic Goals",
+      content: (
+        <DropdownMultiSelect
+          label="Academic Goals"
+          options={ACADEMIC_GOAL_OPTIONS}
+          value={draft.academicGoals || []}
+          onChange={(v) => setDraft({ ...draft, academicGoals: v })}
         />
-    ),
-  },
-  {
-    title: "Career Aspirations",
-    content: (
-      <DropdownMultiSelect
-        label="Your career aspirations"
-        options={CAREER_ASPIRATION_OPTIONS}
-        value={draft.careerAspirations || []}
-        onChange={(v) => setDraft({ ...draft, careerAspirations: v })}
-      />
-    ),
-  },
-  {
-    title: "Hobbies",
-    content: (
-      <DropdownMultiSelect
-        label="Hobbies"
-        options={HOBBY_OPTIONS}
-        value={draft.hobbies || []}
-        onChange={(v) => setDraft({ ...draft, hobbies: v })}
-        placeholder="Filter hobbies…"
-      />
-    ),
-  },
-  {
-    title: "Study Availability",
-    content: (
-      <DropdownMultiSelect
-        label="Study Availability"
-        options={AVAILABILITY_OPTIONS}
-        value={draft.availability || []}
-        onChange={(v) => setDraft({ ...draft, availability: v })}
-        placeholder="Filter times…"
-      />
-    ),
-  },
-  {
-   title: "Preferred Study Style",
-    content: (
-      <div className="grid gap-3">
-        <DropdownSelect
-          label="Preferred Study Style"
-          options={STUDY_STYLE_OPTIONS} // ["Solo","Pair","Group"]
-          value={draft.learning?.style || ""}
-          onChange={(v) => {
-            // clear hidden fields when style changes
-            const resets =
-              v === "Solo" ? { groupSize: "", frequency: "" } :
-              v === "Pair" ? { groupSize: "" } :
-              {};
-            setDraft({ ...draft, learning: { ...draft.learning, style: v, ...resets } });
-          }}
+      ),
+    },
+    {
+      title: "Career Aspirations",
+      content: (
+        <DropdownMultiSelect
+          label="Your career aspirations"
+          options={CAREER_ASPIRATION_OPTIONS}
+          value={draft.careerAspirations || []}
+          onChange={(v) => setDraft({ ...draft, careerAspirations: v })}
         />
+      ),
+    },
+    {
+      title: "Hobbies",
+      content: (
+        <DropdownMultiSelect
+          label="Hobbies"
+          options={HOBBY_OPTIONS}
+          value={draft.hobbies || []}
+          onChange={(v) => setDraft({ ...draft, hobbies: v })}
+          placeholder="Filter hobbies…"
+        />
+      ),
+    },
+    {
+      title: "Study Availability",
+      content: (
+        <DropdownMultiSelect
+          label="Study Availability"
+          options={AVAILABILITY_OPTIONS}
+          value={draft.availability || []}
+          onChange={(v) => setDraft({ ...draft, availability: v })}
+          placeholder="Filter times…"
+        />
+      ),
+    },
+    {
+      title: "Preferred Study Style",
+      content: (
+        <div className="grid gap-3">
+          <DropdownSelect
+            label="Preferred Study Style"
+            options={STUDY_STYLE_OPTIONS} // ["Solo","Pair","Group"]
+            value={draft.learning?.style || ""}
+            onChange={(v) => {
+              // clear hidden fields when style changes
+              const resets =
+                v === "Solo" ? { groupSize: "", frequency: "" } :
+                  v === "Pair" ? { groupSize: "" } :
+                    {};
+              setDraft({ ...draft, learning: { ...draft.learning, style: v, ...resets } });
+            }}
+          />
 
-        {/* When Solo: show nothing else */}
-        {draft.learning?.style !== "Solo" && (
-          <>
-            {/* When Pair: hide group size; When Group: show it */}
-            {draft.learning?.style === "Group" && (
+          {/* When Solo: show nothing else */}
+          {draft.learning?.style !== "Solo" && (
+            <>
+              {/* When Pair: hide group size; When Group: show it */}
+              {draft.learning?.style === "Group" && (
+                <DropdownSelect
+                  label="Preferred Group Size"
+                  options={GROUP_SIZE_OPTIONS}
+                  value={draft.learning?.groupSize || ""}
+                  onChange={(v) =>
+                    setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })
+                  }
+                />
+              )}
+
+              {/* Pair & Group both show Frequency */}
               <DropdownSelect
-                label="Preferred Group Size"
-                options={GROUP_SIZE_OPTIONS}
-                value={draft.learning?.groupSize || ""}
+                label="Study Availability Frequency"
+                options={FREQUENCY_OPTIONS}
+                value={draft.learning?.frequency || ""}
                 onChange={(v) =>
-                  setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })
+                  setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })
                 }
               />
-            )}
+            </>
+          )}
+        </div>
+      ),
+    },
+  ];
 
-            {/* Pair & Group both show Frequency */}
-            <DropdownSelect
-              label="Study Availability Frequency"
-              options={FREQUENCY_OPTIONS}
-              value={draft.learning?.frequency || ""}
-              onChange={(v) =>
-                setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })
-              }
-            />
-          </>
-        )}
-      </div>
-    ),
-  },
-];
+  // ---- Re-Onboarding (quick update) ----
+  const stepsRe = [
+    {
+      title: "Education",
+      content: (
+        <div className="grid gap-3">
+          <DropdownSelect
+            label="University"
+            options={UNI_OPTIONS}
+            value={draft.uni}
+            onChange={(v) => setDraft({ ...draft, uni: v })}
+            placeholder="Search universities…"
+          />
+          <DropdownSelect
+            label="Course"
+            options={COURSE_OPTIONS}
+            value={draft.course}
+            onChange={(v) => setDraft({ ...draft, course: v })}
+            placeholder="Search courses…"
+          />
+          <DropdownSelect
+            label="Major"
+            options={MAJOR_OPTIONS}
+            value={draft.major || ""}
+            onChange={(v) => setDraft({ ...draft, major: v })}
+            placeholder="Search majors…"
+          />
+          <DropdownSelect
+            label="Student Type"
+            options={STUDENT_TYPE_OPTIONS}
+            value={draft.studentType}
+            onChange={(v) => setDraft({ ...draft, studentType: v as any })}
+          />
+        </div>
 
-// ---- Re-Onboarding (quick update) ----
-const stepsRe = [
-  {
-    title: "Education",
-    content: (
-      <div className="grid gap-3">
-        <DropdownSelect
-          label="University"
-          options={UNI_OPTIONS}
-          value={draft.uni}
-          onChange={(v) => setDraft({ ...draft, uni: v })}
-          placeholder="Search universities…"
+      ),
+    },
+    {
+      title: "Academic Goals",
+      content: (
+        <DropdownMultiSelect
+          label="Academic Goals"
+          options={ACADEMIC_GOAL_OPTIONS}
+          value={draft.academicGoals || []}
+          onChange={(v) => setDraft({ ...draft, academicGoals: v })}
         />
-        <DropdownSelect
-          label="Course"
-          options={COURSE_OPTIONS}
-          value={draft.course}
-          onChange={(v) => setDraft({ ...draft, course: v })}
-          placeholder="Search courses…"
+      ),
+    },
+    {
+      title: "Career Aspirations",
+      content: (
+        <DropdownMultiSelect
+          label="Your career aspirations"
+          options={CAREER_ASPIRATION_OPTIONS}
+          value={draft.careerAspirations || []}
+          onChange={(v) => setDraft({ ...draft, careerAspirations: v })}
         />
-        <DropdownSelect
-          label="Major"
-          options={MAJOR_OPTIONS}
-          value={draft.major || ""}
-          onChange={(v) => setDraft({ ...draft, major: v })}
-          placeholder="Search majors…"
+      ),
+    },
+    {
+      title: "Hobbies",
+      content: (
+        <DropdownMultiSelect
+          label="Hobbies"
+          options={HOBBY_OPTIONS}
+          value={draft.hobbies || []}
+          onChange={(v) => setDraft({ ...draft, hobbies: v })}
+          placeholder="Filter hobbies…"
         />
-        <DropdownSelect
-          label="Student Type"
-          options={STUDENT_TYPE_OPTIONS}
-          value={draft.studentType}
-          onChange={(v) => setDraft({ ...draft, studentType: v as any })}
+      ),
+    },
+    {
+      title: "Study Availability",
+      content: (
+        <DropdownMultiSelect
+          label="Study Availability"
+          options={AVAILABILITY_OPTIONS}
+          value={draft.availability || []}
+          onChange={(v) => setDraft({ ...draft, availability: v })}
+          placeholder="Filter times…"
         />
-      </div>
+      ),
+    },
+    {
+      title: "Preferred Study Style",
+      content: (
+        <div className="grid gap-3">
+          <DropdownSelect
+            label="Preferred Study Style"
+            options={STUDY_STYLE_OPTIONS} // ["Solo","Pair","Group"]
+            value={draft.learning?.style || ""}
+            onChange={(v) => {
+              // clear hidden fields when style changes
+              const resets =
+                v === "Solo" ? { groupSize: "", frequency: "" } :
+                  v === "Pair" ? { groupSize: "" } :
+                    {};
+              setDraft({ ...draft, learning: { ...draft.learning, style: v, ...resets } });
+            }}
+          />
 
-    ),
-  },
-  {
-    title: "Academic Goals",
-    content: (
-      <DropdownMultiSelect
-      label="Academic Goals"
-      options={ACADEMIC_GOAL_OPTIONS}
-      value={draft.academicGoals || []}
-      onChange={(v) => setDraft({ ...draft, academicGoals: v })}
-        />
-    ),
-  },
-  {
-    title: "Career Aspirations",
-    content: (
-      <DropdownMultiSelect
-        label="Your career aspirations"
-        options={CAREER_ASPIRATION_OPTIONS}
-        value={draft.careerAspirations || []}
-        onChange={(v) => setDraft({ ...draft, careerAspirations: v })}
-      />
-    ),
-  },
-  {
-    title: "Hobbies",
-    content: (
-      <DropdownMultiSelect
-        label="Hobbies"
-        options={HOBBY_OPTIONS}
-        value={draft.hobbies || []}
-        onChange={(v) => setDraft({ ...draft, hobbies: v })}
-        placeholder="Filter hobbies…"
-      />
-    ),
-  },
-  {
-    title: "Study Availability",
-    content: (
-      <DropdownMultiSelect
-        label="Study Availability"
-        options={AVAILABILITY_OPTIONS}
-        value={draft.availability || []}
-        onChange={(v) => setDraft({ ...draft, availability: v })}
-        placeholder="Filter times…"
-      />
-    ),
-  },
-  {
-   title: "Preferred Study Style",
-    content: (
-      <div className="grid gap-3">
-        <DropdownSelect
-          label="Preferred Study Style"
-          options={STUDY_STYLE_OPTIONS} // ["Solo","Pair","Group"]
-          value={draft.learning?.style || ""}
-          onChange={(v) => {
-            // clear hidden fields when style changes
-            const resets =
-              v === "Solo" ? { groupSize: "", frequency: "" } :
-              v === "Pair" ? { groupSize: "" } :
-              {};
-            setDraft({ ...draft, learning: { ...draft.learning, style: v, ...resets } });
-          }}
-        />
+          {/* When Solo: show nothing else */}
+          {draft.learning?.style !== "Solo" && (
+            <>
+              {/* When Pair: hide group size; When Group: show it */}
+              {draft.learning?.style === "Group" && (
+                <DropdownSelect
+                  label="Preferred Group Size"
+                  options={GROUP_SIZE_OPTIONS}
+                  value={draft.learning?.groupSize || ""}
+                  onChange={(v) =>
+                    setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })
+                  }
+                />
+              )}
 
-        {/* When Solo: show nothing else */}
-        {draft.learning?.style !== "Solo" && (
-          <>
-            {/* When Pair: hide group size; When Group: show it */}
-            {draft.learning?.style === "Group" && (
+              {/* Pair & Group both show Frequency */}
               <DropdownSelect
-                label="Preferred Group Size"
-                options={GROUP_SIZE_OPTIONS}
-                value={draft.learning?.groupSize || ""}
+                label="Study Availability Frequency"
+                options={FREQUENCY_OPTIONS}
+                value={draft.learning?.frequency || ""}
                 onChange={(v) =>
-                  setDraft({ ...draft, learning: { ...draft.learning, groupSize: v } })
+                  setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })
                 }
               />
-            )}
+            </>
+          )}
+        </div>
+      ),
+    }
+  ];
 
-            {/* Pair & Group both show Frequency */}
-            <DropdownSelect
-              label="Study Availability Frequency"
-              options={FREQUENCY_OPTIONS}
-              value={draft.learning?.frequency || ""}
-              onChange={(v) =>
-                setDraft({ ...draft, learning: { ...draft.learning, frequency: v } })
-              }
-            />
-          </>
-        )}
-      </div>
-    ),
+  const steps = isReOnboarding ? stepsRe : stepsFull;
+
+  const isLast = step === steps.length - 1;
+
+  function validateStep(stepTitle: string, d: User, reOnboarding: boolean): string | null {
+    switch (stepTitle) {
+      // Full onboarding only
+      case "Welcome to Nexa":
+        return null; // no inputs here
+
+      case "About You":
+        if (!isTextFilled(d.firstName)) return "Please enter your first name.";
+        if (!isTextFilled(d.lastName)) return "Please enter your last name.";
+        if (!isTextFilled(d.dob)) return "Please enter your date of birth (dd/MM/yyyy).";
+        // Optional: format check (you already added this in next())
+        return null;
+
+      case "Home":
+        if (!isTextFilled(d.homeCountry)) return "Please enter your home country.";
+        if (!isTextFilled(d.homeTown)) return "Please enter your home town.";
+        return null;
+
+      // Shared (full + re-onboarding)
+      case "Education":
+        if (!isTextFilled(d.uni)) return "Please enter your university.";
+        if (!isTextFilled(d.course)) return "Please enter your course.";
+        if (!isTextFilled(d.major)) return "Please enter your major.";
+        if (!isTextFilled(d.studentType)) return "Please specify if you are an International or Domestic student.";
+        return null;
+
+      case "Academic Goals":
+        if (!isListFilled(d.academicGoals)) return "Please add at least one academic goal.";
+        return null;
+
+      case "Career Aspirations":
+        if (!isListFilled(d.careerAspirations)) return "Please add at least one career aspiration.";
+        return null;
+
+      case "Hobbies":
+        if (!isListFilled(d.hobbies)) return "Please add at least one hobby.";
+        return null;
+
+      case "Study Availability":
+        if (!isListFilled(d.availability)) return "Please add at least one availability slot.";
+        return null;
+
+      case "Preferred Study Style":
+        if (!isTextFilled(d.learning?.style))
+          return "Please enter your preferred study style.";
+
+        // Solo: nothing else required
+        if (d.learning?.style === "Solo") return null;
+
+        // Pair: frequency required, group size hidden
+        if (d.learning?.style === "Pair") {
+          if (!isTextFilled(d.learning?.frequency))
+            return "Please enter your study frequency.";
+          return null;
+        }
+
+        // Group: both group size and frequency required
+        if (d.learning?.style === "Group") {
+          if (!isTextFilled(d.learning?.groupSize))
+            return "Please enter your preferred group size.";
+          if (!isTextFilled(d.learning?.frequency))
+            return "Please enter your study frequency.";
+          return null;
+        }
+        return null;
+
+      default:
+        return null;
+    }
   }
-];
-
-const steps = isReOnboarding ? stepsRe : stepsFull;
-
-const isLast = step === steps.length - 1;
-
-function validateStep(stepTitle: string, d: User, reOnboarding: boolean): string | null {
-  switch (stepTitle) {
-    // Full onboarding only
-    case "Welcome to Nexa":
-      return null; // no inputs here
-
-    case "About You":
-      if (!isTextFilled(d.firstName)) return "Please enter your first name.";
-      if (!isTextFilled(d.lastName)) return "Please enter your last name.";
-      if (!isTextFilled(d.dob)) return "Please enter your date of birth (dd/MM/yyyy).";
-      // Optional: format check (you already added this in next())
-      return null;
-
-    case "Home":
-      if (!isTextFilled(d.homeCountry)) return "Please enter your home country.";
-      if (!isTextFilled(d.homeTown)) return "Please enter your home town.";
-      return null;
-
-    // Shared (full + re-onboarding)
-    case "Education":
-      if (!isTextFilled(d.uni)) return "Please enter your university.";
-      if (!isTextFilled(d.course)) return "Please enter your course.";
-      if (!isTextFilled(d.major)) return "Please enter your major.";
-      if (!isTextFilled(d.studentType)) return "Please specify if you are an International or Domestic student.";
-      return null;
-
-    case "Academic Goals":
-      if (!isListFilled(d.academicGoals)) return "Please add at least one academic goal.";
-      return null;
-
-    case "Career Aspirations":
-      if (!isListFilled(d.careerAspirations)) return "Please add at least one career aspiration.";
-      return null;
-
-    case "Hobbies":
-      if (!isListFilled(d.hobbies)) return "Please add at least one hobby.";
-      return null;
-
-    case "Study Availability":
-      if (!isListFilled(d.availability)) return "Please add at least one availability slot.";
-      return null;
-
-    case "Preferred Study Style":
-      if (!isTextFilled(d.learning?.style))
-    return "Please enter your preferred study style.";
-
-  // Solo: nothing else required
-  if (d.learning?.style === "Solo") return null;
-
-  // Pair: frequency required, group size hidden
-  if (d.learning?.style === "Pair") {
-    if (!isTextFilled(d.learning?.frequency))
-      return "Please enter your study frequency.";
-    return null;
-  }
-
-  // Group: both group size and frequency required
-  if (d.learning?.style === "Group") {
-    if (!isTextFilled(d.learning?.groupSize))
-      return "Please enter your preferred group size.";
-    if (!isTextFilled(d.learning?.frequency))
-      return "Please enter your study frequency.";
-    return null;
-  }
-      return null;
-
-    default:
-      return null;
-  }
-}
 
 
   function next() {
-     // Validate required fields for this step
-  const currentTitle = steps[step].title;
-  const validationError = validateStep(currentTitle, draft, isReOnboarding);
-  if (validationError) {
-    setError(validationError);
-    return;
-  }
+    // Validate required fields for this step
+    const currentTitle = steps[step].title;
+    const validationError = validateStep(currentTitle, draft, isReOnboarding);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
 
     // Validate DOB if we're on the DOB step of full onboarding
-  if (!isReOnboarding && steps[step].title === "About You" && draft.dob) {
-    const ddmmyyyy = /^(0?[1-9]|[12][0-9]|3[01])\/(0?[1-9]|1[0-2])\/\d{4}$/;
-    if (!ddmmyyyy.test(draft.dob)) {
-      alert("Please enter DOB in the format dd/MM/yyyy");
-      return; // stop progression
+    if (!isReOnboarding && steps[step].title === "About You" && draft.dob) {
+      const ddmmyyyy = /^(0?[1-9]|[12][0-9]|3[01])\/(0?[1-9]|1[0-2])\/\d{4}$/;
+      if (!ddmmyyyy.test(draft.dob)) {
+        alert("Please enter DOB in the format dd/MM/yyyy");
+        return; // stop progression
+      }
     }
-  }
     if (isLast) {
       setMe(draft);
       setOnboarded(true);
@@ -1849,63 +2180,61 @@ function validateStep(stepTitle: string, d: User, reOnboarding: boolean): string
   // Button can proceed only if there’s no validation error AND (if applicable) DOB format is OK
   const canProceed = !pendingError && dobFormatOk;
 
-
   return (
-  <div
-    className="fixed inset-0 z-50 bg-black/50 backdrop-blur overflow-y-auto overscroll-contain"
-    onClick={() => setOnboarded(true)} // click outside to close
-    role="dialog"
-    aria-modal="true"
+    <div
+      className="fixed inset-0 z-50 bg-black/50 backdrop-blur overflow-y-auto overscroll-contain"
+      onClick={() => setOnboarded(true)} // click outside to close
+      role="dialog"
+      aria-modal="true"
     >
-    <div className="flex min-h-[100svh] items-center justify-center p-4">
-      <div
-        className="w-full max-w-md rounded-3xl bg-white p-6 max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()} // prevent closing when clicking inside
-      >
-        <div className="mb-6 flex items-center justify-between">
-          <div>
-            <div className="text-lg font-semibold">{steps[step].title}</div>
-            <div className="text-xs text-neutral-500">Step {step + 1} of {steps.length}</div>
+      <div className="flex min-h-[100svh] items-center justify-center p-4">
+        <div
+          className="w-full max-w-md rounded-3xl bg-white p-6 max-h-[90vh] overflow-y-auto"
+          onClick={(e) => e.stopPropagation()} // prevent closing when clicking inside
+        >
+          <div className="mb-6 flex items-center justify-between">
+            <div>
+              <div className="text-lg font-semibold">{steps[step].title}</div>
+              <div className="text-xs text-neutral-500">Step {step + 1} of {steps.length}</div>
+            </div>
+            <div className="flex gap-1">
+              {steps.map((_, i) => (
+                <div key={i} className={cx("h-2 w-2 rounded-full", i <= step ? "bg-indigo-600" : "bg-neutral-200")} />
+              ))}
+            </div>
           </div>
-          <div className="flex gap-1">
-            {steps.map((_, i) => (
-              <div key={i} className={cx("h-2 w-2 rounded-full", i <= step ? "bg-indigo-600" : "bg-neutral-200")} />
-            ))}
+
+          <div className="mb-6 overflow-y-auto max-h-[60svh] pr-1">
+            {steps[step].content}
           </div>
-        </div>
 
-        <div className="mb-6 overflow-y-auto max-h-[60svh] pr-1">
-          {steps[step].content}
-        </div>
+          {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
 
-        {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
-
-        <div className="flex gap-3">
-          {step > 0 && (
-            <button
-              className={cx(btnBase, "border bg-white")}
-              onClick={() => setStep(step - 1)}
-            >
-              Back
-            </button>
-          )}
-
-          <button
-            className={cx(
-              btnBase,
-              "flex-1",
-              canProceed
-                ? "bg-indigo-600 text-white"
-                : "bg-neutral-300 text-neutral-500 cursor-not-allowed"
+          <div className="flex gap-3">
+            {step > 0 && (
+              <button
+                className={cx(btnBase, "border bg-white")}
+                onClick={() => setStep(step - 1)}
+              >
+                Back
+              </button>
             )}
-            onClick={next}
-            disabled={!canProceed}
-          >
-            {isLast ? "Complete Setup" : "Next"}
-          </button>
+            <button
+              className={cx(
+                btnBase,
+                "flex-1",
+                canProceed
+                  ? "bg-indigo-600 text-white"
+                  : "bg-neutral-300 text-neutral-500 cursor-not-allowed"
+              )}
+              onClick={next}
+              disabled={!canProceed}
+            >
+              {isLast ? "Complete Setup" : "Next"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
-  </div>
   );
 }
