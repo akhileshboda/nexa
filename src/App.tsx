@@ -342,6 +342,64 @@ function scoreMatch(me: User, other: User) {
   return Math.round(s * 10) / 10;
 }
 
+// --- Supabase chat helpers (MVP 1-to-1) ---
+async function getMyUserId(): Promise<string | null> {
+  const { data } = await supabase.auth.getUser();
+  return data.user?.id ?? null;
+}
+
+async function getUserIdByEmail(email: string): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("user_directory")
+    .select("user_id")
+    .eq("email", email)
+    .maybeSingle();
+  if (error) {
+    console.error("getUserIdByEmail:", error.message);
+    return null;
+  }
+  return data?.user_id ?? null;
+}
+
+async function listMessagesWith(otherUserId: string) {
+  const me = await getMyUserId();
+  if (!me) return [];
+  const { data, error } = await supabase
+    .from("messages")
+    .select("*")
+    .or(
+      `and(sender_id.eq.${me},recipient_id.eq.${otherUserId}),and(sender_id.eq.${otherUserId},recipient_id.eq.${me})`
+    )
+    .order("created_at", { ascending: true });
+  if (error) {
+    console.error("listMessagesWith:", error.message);
+    return [];
+  }
+  return data ?? [];
+}
+
+async function sendMessageTo(otherUserId: string, text: string) {
+  const me = await getMyUserId();
+  if (!me || !text.trim()) return;
+  const { error } = await supabase
+    .from("messages")
+    .insert([{ sender_id: me, recipient_id: otherUserId, text }]);
+  if (error) console.error("sendMessageTo:", error.message);
+}
+
+function subscribeToThread(otherUserId: string, onNew: (row: any) => void) {
+  const channel = supabase
+    .channel(`dm:${otherUserId}`)
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "messages" },
+      (payload) => onNew(payload.new)
+    )
+    .subscribe();
+  return () => supabase.removeChannel(channel);
+}
+
+
 // -----------------------------------------------------------------------------
 // Main App
 // -----------------------------------------------------------------------------
@@ -371,8 +429,6 @@ export default function App() {
   const [onboarded, setOnboarded] = useState(() => storage.get("nexa_onboarded", false));
   const [likes, setLikes] = useState(() => storage.get("nexa_likes", []));
   const [skips, setSkips] = useState(() => storage.get("nexa_skips", []));
-  const [messages, setMessages] = useState(() => storage.get("nexa_msgs", SEEDED_MESSAGES));
-  const [currentChat, setCurrentChat] = useState<string | null>(null);
   const [filters, setFilters] = useState<string[]>([]); // event tags
 
   // 🔹 Auth state
@@ -386,7 +442,6 @@ export default function App() {
   useEffect(() => storage.set("nexa_onboarded", onboarded), [onboarded]);
   useEffect(() => storage.set("nexa_likes", likes), [likes]);
   useEffect(() => storage.set("nexa_skips", skips), [skips]);
-  useEffect(() => storage.set("nexa_msgs", messages), [messages]);
 
   // 🔹 User registry management
   const getUsers = () => storage.get("nexa_users", []);
@@ -415,6 +470,20 @@ export default function App() {
       sub.subscription.unsubscribe();
     };
   }, []);
+
+  // Put me in user_directory so others can find me by email
+  useEffect(() => {
+    async function upsertDirectory() {
+      const { data } = await supabase.auth.getUser();
+      const user = data?.user;
+      if (!user?.id || !user.email) return;
+      await supabase
+        .from("user_directory")
+        .upsert({ user_id: user.id, email: user.email }, { onConflict: "user_id" });
+    }
+    if (authed) upsertDirectory();
+  }, [authed]);
+
 
   // 🔹 Sign in
   async function handleSignIn(email: string, password: string) {
@@ -489,25 +558,16 @@ export default function App() {
     return scored;
   }
 
-  function sendMessage(userId: string, text: string) {
-    if (!text.trim()) return;
-    setMessages((prev) => ({
-      ...prev,
-      [userId]: [...(prev[userId] || []), { from: "me", text }],
-    }));
-  }
 
   function resetDemo() {
     storage.del("nexa_me");
     storage.del("nexa_onboarded");
     storage.del("nexa_likes");
     storage.del("nexa_skips");
-    storage.del("nexa_msgs");
     setMe(DEFAULT_USER);
     setOnboarded(false);
     setLikes([]);
     setSkips([]);
-    setMessages(SEEDED_MESSAGES);
     setCurrentChat(null);
     setTab("home");
   }
@@ -563,14 +623,7 @@ export default function App() {
             />
           )}
           {tab === "messages" && (
-            <MessagesScreen
-              pool={pool}
-              messages={messages}
-              setMessages={setMessages}
-              currentChat={currentChat}
-              setCurrentChat={setCurrentChat}
-              onSend={sendMessage}
-            />
+            <MessagesScreen pool={pool} />
           )}
           {tab === "events" && (
             <EventsScreen
@@ -1023,85 +1076,146 @@ function CompactProfile({ p }: any) {
   );
 }
 
-function MessagesScreen({ pool, messages, setMessages, currentChat, setCurrentChat, onSend }: any) {
-  const peers = pool.filter((p: any) => messages[p.id]);
-  const active = pool.find((p: any) => p.id === currentChat) || peers[0];
-  useEffect(() => {
-    if (!currentChat && active) setCurrentChat(active.id);
-  }, [active, currentChat, setCurrentChat]);
+function MessagesScreen({ pool }: any) {
+  // MVP flow: type a recipient email to open a chat
+  const [recipientEmail, setRecipientEmail] = useState("");
+  const [otherId, setOtherId] = useState<string | null>(null);
+  const [thread, setThread] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const unsubRef = useRef<null | (() => void)>(null);
+
+  async function openChat() {
+    setLoading(true);
+    try {
+      const id = await getUserIdByEmail(recipientEmail.trim());
+      if (!id) {
+        alert("No user found with that email (make sure they’ve logged in at least once).");
+        return;
+      }
+      setOtherId(id);
+
+      // load history
+      const rows = await listMessagesWith(id);
+      setThread(rows);
+
+      // realtime
+      unsubRef.current?.();
+      const me = await getMyUserId();
+      unsubRef.current = subscribeToThread(id, (row) => {
+        if (!me) return;
+        const isOurs =
+          (row.sender_id === me && row.recipient_id === id) ||
+          (row.sender_id === id && row.recipient_id === me);
+        if (isOurs) setThread((prev) => [...prev, row]);
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => () => unsubRef.current?.(), []);
 
   return (
     <div className="grid grid-cols-1 gap-4">
-      {/* Conversations */}
+      {/* Start a chat by email */}
       <div className={cardBase}>
-        <div className="mb-2 flex items-center justify-between">
-          <div className="text-sm font-semibold">Conversations</div>
-          <button className={cx(btnBase, "border bg-white text-xs")}
-            onClick={() => alert("In a full build, you could start a new chat from a liked profile.")}
+        <div className="mb-2 text-sm font-semibold">Start a conversation</div>
+        <div className="flex gap-2">
+          <input
+            className="flex-1 rounded-xl border bg-white px-3 py-2 text-sm"
+            placeholder="friend@example.com"
+            value={recipientEmail}
+            onChange={(e) => setRecipientEmail(e.target.value)}
+          />
+          <button
+            className={cx(btnBase, "border bg-white")}
+            onClick={openChat}
+            disabled={loading || !recipientEmail.trim()}
           >
-            <Plus className="mr-1 h-3.5 w-3.5"/> New
+            Open Chat
           </button>
         </div>
-        {peers.length ? (
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {peers.map((p: any) => (
-              <button
-                key={p.id}
-                onClick={() => setCurrentChat(p.id)}
-                className={cx(
-                  "flex min-w-[140px] items-center gap-2 rounded-xl border px-3 py-2",
-                  currentChat === p.id ? "border-indigo-500 bg-indigo-50" : "bg-white"
-                )}
-              >
-                <Avatar name={p.name} size={32} seed={p.seed} />
-                <div className="min-w-0 text-left">
-                  <div className="truncate text-xs font-medium">{p.name}</div>
-                  <div className="truncate text-[11px] text-neutral-600">{p.course}</div>
-                </div>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div className="text-sm text-neutral-600">No conversations yet. Like a profile to get started.</div>
-        )}
+        <div className="mt-2 text-xs text-neutral-500">
+          Tip: the other person must have logged in once so they appear in <code>user_directory</code>.
+        </div>
       </div>
 
       {/* Active chat */}
-      {active && (
-        <ChatBox key={active.id} peer={active} msgs={messages[active.id] || []} onSend={(t: string) => onSend(active.id, t)} />
+      {otherId ? (
+        <ChatBox
+          otherId={otherId}
+          thread={thread}
+          onSend={async (t: string) => {
+            await sendMessageTo(otherId, t);
+            // (optional optimistic UI) the realtime sub will append anyway
+          }}
+        />
+      ) : (
+        <div className={cardBase}>
+          <div className="text-sm text-neutral-600">Open a chat to begin.</div>
+        </div>
       )}
     </div>
   );
 }
 
-function ChatBox({ peer, msgs, onSend }: any) {
+function ChatBox({
+  otherId,
+  thread,
+  onSend,
+}: {
+  otherId: string;
+  thread: any[];
+  onSend: (t: string) => void;
+}) {
   const [text, setText] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [thread]);
+
+  // simple “me/them” check for bubble styling
+  const [myId, setMyId] = useState<string | null>(null);
+  useEffect(() => {
+    getMyUserId().then(setMyId);
+  }, []);
+
   return (
     <div className={cardBase}>
-      <div className="mb-2 flex items-center gap-2">
-        <Avatar name={peer.name} size={36} seed={peer.seed} />
-        <div>
-          <div className="text-sm font-semibold">{peer.name}</div>
-          <div className="text-xs text-neutral-600">{peer.course} • {peer.uni}</div>
-        </div>
-      </div>
+      <div className="mb-2 text-sm font-semibold">Direct Messages</div>
+
       <div className="h-64 overflow-y-auto rounded-xl border bg-white p-3">
-        {msgs.map((m: Message, i: number) => (
-          <div key={i} className={cx("mb-2 flex", m.from === "me" ? "justify-end" : "justify-start")}>
-            <div className={cx("max-w-[75%] rounded-2xl px-3 py-2 text-sm", m.from === "me" ? "bg-neutral-900 text-white" : "bg-neutral-100")}>
-              {m.text}
+        {thread.map((m: any) => {
+          const fromMe = m.sender_id === myId;
+          return (
+            <div
+              key={m.id ?? m.created_at}
+              className={cx("mb-2 flex", fromMe ? "justify-end" : "justify-start")}
+            >
+              <div
+                className={cx(
+                  "max-w-[75%] rounded-2xl px-3 py-2 text-sm",
+                  fromMe ? "bg-neutral-900 text-white" : "bg-neutral-100"
+                )}
+              >
+                {m.text}
+                <div className="mt-1 text-[10px] opacity-60">
+                  {new Date(m.created_at).toLocaleString()}
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
         <div ref={endRef} />
       </div>
+
       <form
         className="mt-2 flex items-center gap-2"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          onSend(text);
+          const t = text.trim();
+          if (!t) return;
+          await onSend(t);
           setText("");
         }}
       >
@@ -1118,6 +1232,7 @@ function ChatBox({ peer, msgs, onSend }: any) {
     </div>
   );
 }
+
 
 function EventsScreen({ pool, events, filters, setFilters, me }: any) {
   const toggleTag = (t: string) =>
