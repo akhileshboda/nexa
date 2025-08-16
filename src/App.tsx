@@ -21,10 +21,35 @@ import {
   Bell,
 } from "lucide-react";
 
+import { supabase } from "./lib/supabase"; // make sure this exists
+// 👇 expose it for debugging in the browser console
+;(window as any).supabase = supabase;
+
 import AuthScreen from "./components/AuthScreen";
 import Avatar from "./components/Avatar";
 import { btnBase, cardBase, chipBase, cx, TextInput, ChipsInput, ToggleRow } from "./components/UI";
 import logo from "./assets/logo.png";
+
+export async function sendTestMessage(groupId: string) {
+  const { data: s } = await supabase.auth.getSession();
+  const myId = s?.session?.user?.id;
+  if (!myId) {
+    console.warn("You are not signed in!");
+    return;
+  }
+
+  const { error } = await supabase.from("messages").insert({
+    group_id: groupId,   // <- replace with a real group id
+    sender_id: myId,     // must match your logged-in user
+    message: "Hello from the app!"
+  });
+
+  if (error) console.error(error);
+}
+
+// Attach it to window so you can call it from the browser console
+;(window as any).sendTestMessage = sendTestMessage;
+
 
 // ----------------------------------------------------------------------------
 // Fixed Options
@@ -321,6 +346,26 @@ function scoreMatch(me: User, other: User) {
 // Main App
 // -----------------------------------------------------------------------------
 export default function App() {
+  // 🔹 Realtime messages debug subscription
+  useEffect(() => {
+    const channel = supabase
+      .channel("debug")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        (payload) => {
+          console.log("Realtime debug – new row:", payload.new);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      // clean up on unmount
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // 🔹 Local state
   const [tab, setTab] = useState("home");
   const [me, setMe] = useState(() => storage.get("nexa_me", DEFAULT_USER));
   const [onboarded, setOnboarded] = useState(() => storage.get("nexa_onboarded", false));
@@ -329,11 +374,12 @@ export default function App() {
   const [messages, setMessages] = useState(() => storage.get("nexa_msgs", SEEDED_MESSAGES));
   const [currentChat, setCurrentChat] = useState<string | null>(null);
   const [filters, setFilters] = useState<string[]>([]); // event tags
-  
-  // Auth state
+
+  // 🔹 Auth state
   const [authed, setAuthed] = useState(() => storage.get("nexa_authed", false));
   const [currentEmail, setCurrentEmail] = useState(() => storage.get("nexa_current_email", ""));
 
+  // 🔹 Persist state in local storage
   useEffect(() => storage.set("nexa_authed", authed), [authed]);
   useEffect(() => storage.set("nexa_current_email", currentEmail), [currentEmail]);
   useEffect(() => storage.set("nexa_me", me), [me]);
@@ -342,46 +388,78 @@ export default function App() {
   useEffect(() => storage.set("nexa_skips", skips), [skips]);
   useEffect(() => storage.set("nexa_msgs", messages), [messages]);
 
-  // User registry management
+  // 🔹 User registry management
   const getUsers = () => storage.get("nexa_users", []);
   const setUsers = (arr: any[]) => storage.set("nexa_users", arr);
 
-  function handleSignIn(email: string, password: string) {
-    const users = getUsers();
-    const found = users.find((u: any) => 
-      u.email.trim().toLowerCase() === email.trim().toLowerCase() && u.password === password
-    );
-    if (found) {
-      setAuthed(true);
-      setCurrentEmail(found.email);
-      if (!me.name || me.name === "You") {
-        setMe({ ...me, name: found.name || "Student" });
+  // 🟢 Keep authed flag in sync with Supabase session
+  useEffect(() => {
+    // Check on load
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) {
+        setAuthed(true);
+        setCurrentEmail(data.session.user?.email ?? "");
+      } else {
+        setAuthed(false);
+        setCurrentEmail("");
       }
-      return true;
-    }
-    return false;
-  }
+    });
 
-  function handleRegister(name: string, email: string, password: string) {
-    const users = getUsers();
-    if (users.find((u: any) => u.email.trim().toLowerCase() === email.trim().toLowerCase())) {
+    // Subscribe to login/logout events
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthed(!!session);
+      setCurrentEmail(session?.user?.email ?? "");
+    });
+
+    return () => {
+      sub.subscription.unsubscribe();
+    };
+  }, []);
+
+  // 🔹 Sign in
+  async function handleSignIn(email: string, password: string) {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) {
+      console.error("Sign-in failed:", error.message);
       return false;
     }
-    const newUsers = [...users, { name, email, password }];
-    setUsers(newUsers);
     setAuthed(true);
-    setCurrentEmail(email);
-    setMe({ ...DEFAULT_USER, name: name || "Student" });
-    setOnboarded(false); // trigger onboarding flow for new users
+    setCurrentEmail(data.user?.email ?? "");
+    if (!me.name || me.name === "You") {
+      setMe({ ...me, name: data.user?.user_metadata?.full_name || me.name || "Student" });
+    }
     return true;
   }
 
-  function handleLogout() {
+  // 🔹 Register
+  async function handleRegister(name: string, email: string, password: string) {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { full_name: name } },
+    });
+    if (error) {
+      console.error("Registration failed:", error.message);
+      return false;
+    }
+
+    if (data.user) {
+      setAuthed(true);
+      setCurrentEmail(data.user.email ?? "");
+      if (!me.name || me.name === "You") setMe({ ...me, name });
+    }
+    return true;
+  }
+
+  // 🔹 Logout
+  async function handleLogout() {
+    await supabase.auth.signOut();
     setAuthed(false);
     setCurrentEmail("");
     resetDemo();
   }
 
+  // 🔹 Helpers
   const pool = useMemo(() => SAMPLE_PROFILES, []);
   const likedUsers = pool.filter((p) => likes.includes(p.id));
 
@@ -434,7 +512,7 @@ export default function App() {
     setTab("home");
   }
 
-  // Show auth screen if not authenticated
+  // 🟢 Show auth screen if not authenticated
   if (!authed) {
     return <AuthScreen onSignIn={handleSignIn} onRegister={handleRegister} />;
   }
@@ -446,7 +524,7 @@ export default function App() {
         <header className="sticky top-0 z-20 bg-white/80 backdrop-blur">
           <div className="flex items-center justify-between px-4 py-3">
             <div className="flex items-center gap-2">
-            <img src={logo} alt="Nexa" className="h-20 w-20" />
+              <img src={logo} alt="Nexa" className="h-20 w-20" />
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -525,6 +603,9 @@ export default function App() {
     </div>
   );
 }
+
+
+
 
 // -----------------------------------------------------------------------------
 // Components
