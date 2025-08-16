@@ -327,72 +327,263 @@ const DEFAULT_USER: User = {
   privacy: { showLocation: false, shareProfileWithMatchesOnly: true },
 };
 
-// Simple rule‑based score for demo purposes
-function scoreMatch(me: User, other: User) {
-  let s = 0;
+
+// Simple rule-based score (null/undefined safe)
+export function scoreMatch(me?: User | null, other?: User | null): number {
   if (!me || !other) return 0;
-  if (me.course && other.course && me.course.split(" ")[0] === other.course.split(" ")[0]) s += 2;
+  let s = 0;
+
+  // same primary course code (e.g., "FIT2004 Algorithms")
+  const meCourse = me.course?.split(" ")?.[0];
+  const otherCourse = other.course?.split(" ")?.[0];
+  if (meCourse && otherCourse && meCourse === otherCourse) s += 2;
+
+  // same uni
   if (me.uni && other.uni && me.uni === other.uni) s += 2;
-  const commonInterests = (me.interests || []).filter((i) => other.interests.includes(i));
-  s += commonInterests.length * 1.5;
-  const goalOverlap = (me.goals || []).filter((g) => other.goals.includes(g)).length;
+
+  // common interests / goals / availability
+  const interestsA = Array.isArray(me.interests) ? me.interests : [];
+  const interestsB = Array.isArray(other.interests) ? other.interests : [];
+  const goalsA = Array.isArray(me.goals) ? me.goals : [];
+  const goalsB = Array.isArray(other.goals) ? other.goals : [];
+  const availA = Array.isArray(me.availability) ? me.availability : [];
+  const availB = Array.isArray(other.availability) ? other.availability : [];
+
+  const commonInterests = interestsA.filter(i => interestsB.includes(i)).length;
+  s += commonInterests * 1.5;
+
+  const goalOverlap = goalsA.filter(g => goalsB.includes(g)).length;
   s += goalOverlap * 1.5;
-  const availOverlap = (me.availability || []).filter((a) => other.availability.includes(a)).length;
+
+  const availOverlap = availA.filter(a => availB.includes(a)).length;
   s += availOverlap * 1.25;
+
   return Math.round(s * 10) / 10;
 }
 
-// --- Supabase chat helpers (MVP 1-to-1) ---
+// --- Minimal UI tokens (Tailwind) ---
+const ui = {
+  card: "rounded-2xl border border-neutral-200 bg-white p-4",
+  button: "inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm border border-neutral-200 hover:bg-neutral-50 active:scale-[.98] transition",
+  primary: "inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm bg-indigo-600 text-white hover:bg-indigo-600/90 active:scale-[.98] transition",
+  input: "w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm outline-none focus:ring-4 focus:ring-indigo-100 focus:border-indigo-300 transition",
+  listItem: "w-full text-left flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-neutral-50 transition",
+  badge: "grid h-10 w-10 place-items-center rounded-xl bg-neutral-900 text-white text-xs font-semibold shadow-sm",
+};
+
+// Short, single-line time like 16:09
+function formatTime(ts?: string) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+
+
+// ---------- Supabase chat helpers (Groups + DMs) ----------
+// (Assumes tables: conversations, conversation_members, messages(conversation_id,sender_id,text,created_at)
+// and user_directory(email -> user_id))
+
+// Replace DM "Direct Message" with the other person's email/name
+async function decorateConversations(convs: any[]) {
+  if (!convs.length) return [];
+
+  const ids = convs.map(c => c.id);
+
+  // Get members for these conversations
+  const { data: mems } = await supabase
+    .from("conversation_members")
+    .select("conversation_id, user_id")
+    .in("conversation_id", ids);
+
+  const me = await getMyUserId();
+
+  // Map conv → members
+  const byConv: Record<string, string[]> = {};
+  (mems || []).forEach(m => {
+    if (!byConv[m.conversation_id]) byConv[m.conversation_id] = [];
+    byConv[m.conversation_id].push(m.user_id);
+  });
+
+  // Collect other user ids for DMs
+  const otherIds = new Set<string>();
+  convs.forEach(c => {
+    if (c.is_dm && byConv[c.id]) {
+      const otherUserId = byConv[c.id].find(uid => uid !== me);
+      if (otherUserId) otherIds.add(otherUserId);
+    }
+  });
+
+  // Lookup their emails (or names if you add that column)
+  let users: { user_id: string; email: string }[] = [];
+  if (otherIds.size > 0) {
+    const { data } = await supabase
+      .from("user_directory")
+      .select("user_id, email")
+      .in("user_id", Array.from(otherIds));
+    users = data || [];
+  }
+  const emailById = new Map(users.map(u => [u.user_id, u.email]));
+
+  // Attach `title`
+  return convs.map(c => {
+    let title = c.name || "Group";
+    if (c.is_dm && byConv[c.id]) {
+      const otherUserId = byConv[c.id].find(uid => uid !== me);
+      title = emailById.get(otherUserId || "") || "Direct Message";
+    }
+    return { ...c, title };
+  });
+}
+
+
+
 async function getMyUserId(): Promise<string | null> {
-  const { data } = await supabase.auth.getUser();
-  return data.user?.id ?? null;
+  const { data } = await supabase.auth.getSession();
+  return data?.session?.user?.id ?? null;
 }
 
 async function getUserIdByEmail(email: string): Promise<string | null> {
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from("user_directory")
     .select("user_id")
-    .eq("email", email)
-    .maybeSingle();
-  if (error) {
-    console.error("getUserIdByEmail:", error.message);
-    return null;
-  }
+    .eq("email", email.trim().toLowerCase())
+    .single();
   return data?.user_id ?? null;
 }
 
-async function listMessagesWith(otherUserId: string) {
+// Chat log: all conversations I'm in, with last-message preview
+async function listMyConversations() {
   const me = await getMyUserId();
   if (!me) return [];
-  const { data, error } = await supabase
+
+  const { data: mems } = await supabase
+    .from("conversation_members")
+    .select("conversation_id")
+    .eq("user_id", me);
+
+  const ids = (mems || []).map(m => m.conversation_id);
+  if (!ids.length) return [];
+
+  const { data: convs } = await supabase
+    .from("conversations")
+    .select("id, name, is_dm, created_at")
+    .in("id", ids)
+    .order("created_at", { ascending: false });
+
+  if (!convs?.length) return [];
+
+  const { data: msgs } = await supabase
+    .from("messages")
+    .select("id, conversation_id, text, created_at, sender_id")
+    .in("conversation_id", ids)
+    .order("created_at", { ascending: false });
+
+  const lastByConv = new Map<string, any>();
+  (msgs || []).forEach(m => {
+    if (!lastByConv.has(m.conversation_id)) lastByConv.set(m.conversation_id, m);
+  });
+
+  const enriched = convs.map(c => ({ ...c, lastMessage: lastByConv.get(c.id) || null }));
+  return await decorateConversations(enriched);
+
+
+}
+
+// Open or create a DM by email
+async function openOrCreateDMByEmail(email: string): Promise<string | null> {
+  const other = await getUserIdByEmail(email);
+  if (!other) return null;
+
+  const me = await getMyUserId();
+  if (!me) return null;
+
+  // find any conversation both users are in
+  const { data: myMems } = await supabase
+    .from("conversation_members")
+    .select("conversation_id")
+    .eq("user_id", me);
+  const myIds = (myMems || []).map(m => m.conversation_id);
+
+  if (myIds.length) {
+    const { data: overlap } = await supabase
+      .from("conversation_members")
+      .select("conversation_id")
+      .eq("user_id", other)
+      .in("conversation_id", myIds);
+    if (overlap?.length) return overlap[0].conversation_id as string;
+  }
+
+  // create a new DM conversation + add both members
+  const { data: c } = await supabase
+    .from("conversations")
+    .insert({ is_dm: true })
+    .select("id")
+    .single();
+  if (!c) return null;
+
+  await supabase.from("conversation_members").insert([
+    { conversation_id: c.id, user_id: me },
+    { conversation_id: c.id, user_id: other },
+  ]);
+
+  return c.id as string;
+}
+
+// Create a named group and add emails (+you)
+async function createGroupByEmails(name: string, emails: string[]): Promise<string | null> {
+  const me = await getMyUserId();
+  if (!me) return null;
+
+  const { data: c } = await supabase
+    .from("conversations")
+    .insert({ name: name.trim(), is_dm: false })
+    .select("id")
+    .single();
+  if (!c) return null;
+
+  const { data: rows } = await supabase
+    .from("user_directory")
+    .select("user_id")
+    .in("email", emails.map(e => e.trim().toLowerCase()));
+
+  const ids = new Set<string>([me]);
+  (rows || []).forEach(r => r.user_id && ids.add(r.user_id));
+
+  await supabase.from("conversation_members").insert(
+    Array.from(ids).map(uid => ({ conversation_id: c.id, user_id: uid }))
+  );
+
+  return c.id as string;
+}
+
+// Messages in a conversation (used by right pane)
+async function listMessages(conversationId: string) {
+  const { data } = await supabase
     .from("messages")
     .select("*")
-    .or(
-      `and(sender_id.eq.${me},recipient_id.eq.${otherUserId}),and(sender_id.eq.${otherUserId},recipient_id.eq.${me})`
-    )
+    .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true });
-  if (error) {
-    console.error("listMessagesWith:", error.message);
-    return [];
-  }
-  return data ?? [];
+  return data || [];
 }
 
-async function sendMessageTo(otherUserId: string, text: string) {
+// Send a message to the selected conversation
+async function sendMessage(conversationId: string, text: string) {
   const me = await getMyUserId();
   if (!me || !text.trim()) return;
-  const { error } = await supabase
-    .from("messages")
-    .insert([{ sender_id: me, recipient_id: otherUserId, text }]);
-  if (error) console.error("sendMessageTo:", error.message);
+  await supabase.from("messages").insert({
+    conversation_id: conversationId,
+    sender_id: me,
+    text: text.trim(),
+  });
 }
 
-function subscribeToThread(otherUserId: string, onNew: (row: any) => void) {
+// Realtime: only new messages for this conversation
+function subscribeToConversation(conversationId: string, onNew: (row: any) => void) {
   const channel = supabase
-    .channel(`dm:${otherUserId}`)
+    .channel(`conv:${conversationId}`)
     .on(
       "postgres_changes",
-      { event: "INSERT", schema: "public", table: "messages" },
+      { event: "INSERT", schema: "public", table: "messages", filter: `conversation_id=eq.${conversationId}` },
       (payload) => onNew(payload.new)
     )
     .subscribe();
@@ -1076,83 +1267,175 @@ function CompactProfile({ p }: any) {
   );
 }
 
-function MessagesScreen({ pool }: any) {
-  // MVP flow: type a recipient email to open a chat
-  const [recipientEmail, setRecipientEmail] = useState("");
-  const [otherId, setOtherId] = useState<string | null>(null);
+// ---- Chat Screen (left: chat log, right: messages) ----
+
+function MessagesScreen() {
+  // LEFT: chat log state
+  const [conversations, setConversations] = useState<any[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // DM and Group creation
+  const [dmEmail, setDmEmail] = useState("");
+  const [newGroupOpen, setNewGroupOpen] = useState(false);
+  const [groupName, setGroupName] = useState("");
+  const [groupEmails, setGroupEmails] = useState("");
+
+  // RIGHT: current thread state
   const [thread, setThread] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
   const unsubRef = useRef<null | (() => void)>(null);
 
-  async function openChat() {
-    setLoading(true);
-    try {
-      const id = await getUserIdByEmail(recipientEmail.trim());
-      if (!id) {
-        alert("No user found with that email (make sure they’ve logged in at least once).");
-        return;
-      }
-      setOtherId(id);
-
-      // load history
-      const rows = await listMessagesWith(id);
-      setThread(rows);
-
-      // realtime
-      unsubRef.current?.();
-      const me = await getMyUserId();
-      unsubRef.current = subscribeToThread(id, (row) => {
-        if (!me) return;
-        const isOurs =
-          (row.sender_id === me && row.recipient_id === id) ||
-          (row.sender_id === id && row.recipient_id === me);
-        if (isOurs) setThread((prev) => [...prev, row]);
-      });
-    } finally {
-      setLoading(false);
+  // --- Load chat log + auto-select latest ---
+  async function refreshConversations() {
+    const rows = await listMyConversations();
+    setConversations(rows);
+    if (!selectedId && rows.length) {
+      setSelectedId(rows[0].id); // auto-select newest so right pane isn’t blank
     }
   }
+  useEffect(() => { refreshConversations(); /* on mount */ }, []); // no deps
 
-  useEffect(() => () => unsubRef.current?.(), []);
+  // --- Open a DM by email ---
+  async function handleOpenDM() {
+    const cid = await openOrCreateDMByEmail(dmEmail);
+    if (!cid) { alert("User not found or could not create DM."); return; }
+    setSelectedId(cid);
+    setDmEmail("");
+    refreshConversations();
+  }
+
+  // --- Create a named group ---
+  async function handleCreateGroup() {
+    const emails = groupEmails.split(",").map(s => s.trim()).filter(Boolean);
+    if (!groupName.trim() || emails.length === 0) {
+      alert("Enter a group name and at least one email.");
+      return;
+    }
+    const cid = await createGroupByEmails(groupName, emails);
+    if (!cid) { alert("Could not create group."); return; }
+    setNewGroupOpen(false);
+    setGroupName("");
+    setGroupEmails("");
+    setSelectedId(cid);
+    refreshConversations();
+  }
+
+  // --- Load & subscribe to messages when selection changes ---
+  useEffect(() => {
+    unsubRef.current?.();             // stop previous subscription
+    if (!selectedId) { setThread([]); return; }
+
+    (async () => {
+      setThread(await listMessages(selectedId));
+      unsubRef.current = subscribeToConversation(selectedId, (row) => {
+        setThread(prev => [...prev, row]);
+        // keep previews fresh
+        refreshConversations();
+      });
+    })();
+
+    return () => unsubRef.current?.();
+  }, [selectedId]);
 
   return (
-    <div className="grid grid-cols-1 gap-4">
-      {/* Start a chat by email */}
-      <div className={cardBase}>
-        <div className="mb-2 text-sm font-semibold">Start a conversation</div>
-        <div className="flex gap-2">
+    <div className="grid grid-rows-[auto,1fr] gap-4">
+      {/* LEFT: Chat log */}
+      <div className={`${ui.card} p-4`}>
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Chats</h3>
+          <button className={ui.button} onClick={refreshConversations}>Refresh</button>
+        </div>
+
+        {/* Start DM */}
+        <div className="mb-3 flex gap-2">
           <input
-            className="flex-1 rounded-xl border bg-white px-3 py-2 text-sm"
+            className={ui.input}
             placeholder="friend@example.com"
-            value={recipientEmail}
-            onChange={(e) => setRecipientEmail(e.target.value)}
+            value={dmEmail}
+            onChange={(e) => setDmEmail(e.target.value)}
           />
-          <button
-            className={cx(btnBase, "border bg-white")}
-            onClick={openChat}
-            disabled={loading || !recipientEmail.trim()}
-          >
-            Open Chat
+          <button className={ui.button} onClick={handleOpenDM} disabled={!dmEmail.trim()}>
+            DM
           </button>
         </div>
-        <div className="mt-2 text-xs text-neutral-500">
-          Tip: the other person must have logged in once so they appear in <code>user_directory</code>.
+
+        {/* New Group */}
+        <button className={`${ui.button} w-full mb-3`}>
+          <span onClick={() => setNewGroupOpen(true)}>New Group</span>
+        </button>
+
+        {/* Conversation list */}
+        <div className="space-y-1 max-h-[70vh] overflow-y-auto pr-1">
+          {conversations.length === 0 && (
+            <div className="py-10 text-center text-sm text-neutral-500">No chats yet.</div>
+          )}
+
+          {conversations.map((c) => {
+            const last = c.lastMessage;
+            const active = selectedId === c.id;
+            // title: use your decorated title if you added it; otherwise fallback
+            const title = c.title || (c.is_dm ? "Direct Message" : (c.name || "Group"));
+            return (
+              <button
+                key={c.id}
+                onClick={() => setSelectedId(c.id)}
+                className={`${ui.listItem} ${active ? "ring-2 ring-indigo-100 bg-neutral-50" : ""}`}
+              >
+                <div className={ui.badge}>
+                  {(c.is_dm ? (title?.[0]?.toUpperCase() || "D") : (c.name ? c.name[0]?.toUpperCase() : "G"))}
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="truncate text-sm font-medium">{title}</div>
+                    <div className="shrink-0 text-[10px] text-neutral-500">{formatTime(last?.created_at)}</div>
+                  </div>
+                  <div className="truncate text-xs text-neutral-600">
+                    {last ? last.text : "No messages yet"}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {/* Active chat */}
-      {otherId ? (
-        <ChatBox
-          otherId={otherId}
-          thread={thread}
-          onSend={async (t: string) => {
-            await sendMessageTo(otherId, t);
-            // (optional optimistic UI) the realtime sub will append anyway
-          }}
-        />
-      ) : (
-        <div className={cardBase}>
-          <div className="text-sm text-neutral-600">Open a chat to begin.</div>
+
+      {/* RIGHT: Active conversation */}
+      <div className={ui.card}>
+         {selectedId ? (
+           <ChatBox
+             conversationId={selectedId}
+             messages={thread}
+             onSend={(t) => sendMessage(selectedId, t)}
+           />
+         ) : (
+           <div className="text-sm text-neutral-600">Select a chat or start one.</div>
+         )}
+      </div>
+
+      {/* Modal: Create Group */}
+      {newGroupOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4" onClick={() => setNewGroupOpen(false)}>
+          <div className="w-full max-w-md rounded-2xl bg-white p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 text-sm font-semibold">Create Group</div>
+            <input
+              className="mb-2 w-full rounded-xl border px-3 py-2 text-sm"
+              placeholder="Group name"
+              value={groupName}
+              onChange={(e) => setGroupName(e.target.value)}
+            />
+            <textarea
+              className="mb-3 w-full rounded-xl border px-3 py-2 text-sm"
+              rows={3}
+              placeholder="Emails separated by commas"
+              value={groupEmails}
+              onChange={(e) => setGroupEmails(e.target.value)}
+            />
+            <div className="flex gap-2">
+              <button className="rounded-xl border px-3 py-2 text-sm" onClick={() => setNewGroupOpen(false)}>Cancel</button>
+              <button className="rounded-xl bg-neutral-900 px-3 py-2 text-sm text-white" onClick={handleCreateGroup}>Create</button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -1160,47 +1443,39 @@ function MessagesScreen({ pool }: any) {
 }
 
 function ChatBox({
-  otherId,
-  thread,
+  conversationId,
+  messages,
   onSend,
 }: {
-  otherId: string;
-  thread: any[];
+  conversationId: string;
+  messages: any[];
   onSend: (t: string) => void;
 }) {
   const [text, setText] = useState("");
-  const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [thread]);
-
-  // simple “me/them” check for bubble styling
   const [myId, setMyId] = useState<string | null>(null);
-  useEffect(() => {
-    getMyUserId().then(setMyId);
-  }, []);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { getMyUserId().then(setMyId); }, []);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   return (
-    <div className={cardBase}>
-      <div className="mb-2 text-sm font-semibold">Direct Messages</div>
+    <div className={ui.card}>
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-semibold">Chat</h3>
+      </div>
 
-      <div className="h-64 overflow-y-auto rounded-xl border bg-white p-3">
-        {thread.map((m: any) => {
+      <div className="h-[60vh] overflow-y-auto rounded-2xl border border-neutral-200 bg-white p-4">
+        {messages.map((m: any, i: number) => {
           const fromMe = m.sender_id === myId;
           return (
-            <div
-              key={m.id ?? m.created_at}
-              className={cx("mb-2 flex", fromMe ? "justify-end" : "justify-start")}
-            >
+            <div key={m.id ?? `${m.created_at}-${i}`} className={`mb-2 flex ${fromMe ? "justify-end" : "justify-start"}`}>
               <div
-                className={cx(
-                  "max-w-[75%] rounded-2xl px-3 py-2 text-sm",
-                  fromMe ? "bg-neutral-900 text-white" : "bg-neutral-100"
-                )}
+                className={`max-w-[78%] rounded-2xl px-3 py-2 text-sm shadow-sm
+                ${fromMe ? "bg-indigo-600 text-white" : "bg-neutral-100 text-neutral-900"}`}
               >
-                {m.text}
-                <div className="mt-1 text-[10px] opacity-60">
-                  {new Date(m.created_at).toLocaleString()}
+                <div>{m.text}</div>
+                <div className={`mt-1 text-[10px] ${fromMe ? "text-white/70" : "text-neutral-500"}`}>
+                  {new Date(m.created_at).toLocaleString([], { hour: "2-digit", minute: "2-digit" })}
                 </div>
               </div>
             </div>
@@ -1210,7 +1485,7 @@ function ChatBox({
       </div>
 
       <form
-        className="mt-2 flex items-center gap-2"
+        className="mt-3 flex items-center gap-2"
         onSubmit={async (e) => {
           e.preventDefault();
           const t = text.trim();
@@ -1220,14 +1495,12 @@ function ChatBox({
         }}
       >
         <input
-          className="flex-1 rounded-2xl border px-3 py-2 text-sm outline-none focus:border-neutral-400"
+          className={`${ui.input} flex-1`}
           placeholder="Write a message…"
           value={text}
           onChange={(e) => setText(e.target.value)}
         />
-        <button className={cx(btnBase, "bg-indigo-600 text-white")}>
-          <Send className="h-4 w-4" />
-        </button>
+        <button className={ui.primary}>Send</button>
       </form>
     </div>
   );
