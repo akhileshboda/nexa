@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Home as HomeIcon,
-  Heart,
+  PersonStanding,
   MessagesSquare,
   Calendar as CalendarIcon,
   User as UserIcon,
@@ -24,6 +24,7 @@ import {
 import AuthScreen from "./components/AuthScreen";
 import Avatar from "./components/Avatar";
 import { btnBase, cardBase, chipBase, cx, TextInput, ChipsInput, ToggleRow } from "./components/UI";
+import logo from "./assets/logo.png";
 
 // -----------------------------------------------------------------------------
 // Utilities & Storage
@@ -368,8 +369,7 @@ export default function App() {
         <header className="sticky top-0 z-20 bg-white/80 backdrop-blur">
           <div className="flex items-center justify-between px-4 py-3">
             <div className="flex items-center gap-2">
-              <Sparkles className="h-5 w-5" />
-              <span className="text-base font-semibold">Nexa</span>
+            <img src={logo} alt="Nexa" className="h-20 w-20" />
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -435,7 +435,7 @@ export default function App() {
         <nav className="fixed inset-x-0 bottom-0 z-30 border-t bg-white/90 backdrop-blur">
           <div className="mx-auto grid max-w-md grid-cols-5 gap-1 px-2 py-2 text-xs">
             <NavItem icon={<HomeIcon />} label="Home" active={tab === "home"} onClick={() => setTab("home")} />
-            <NavItem icon={<Heart />} label="Matches" active={tab === "matches"} onClick={() => setTab("matches")} />
+            <NavItem icon={<PersonStanding />} label="Matches" active={tab === "matches"} onClick={() => setTab("matches")} />
             <NavItem icon={<MessagesSquare />} label="Messages" active={tab === "messages"} onClick={() => setTab("messages")} />
             <NavItem icon={<CalendarIcon />} label="Events" active={tab === "events"} onClick={() => setTab("events")} />
             <NavItem icon={<UserIcon />} label="Profile" active={tab === "profile"} onClick={() => setTab("profile")} />

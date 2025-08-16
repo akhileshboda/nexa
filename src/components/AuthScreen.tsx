@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { LogIn, UserPlus, Eye, EyeOff } from 'lucide-react';
+import logo from "../assets/logo.png";
 
 const btnBase = "inline-flex items-center justify-center rounded-2xl px-4 py-2 text-sm font-semibold transition active:scale-[0.98]";
 const inputBase = "w-full rounded-2xl border border-neutral-200 px-4 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100";
@@ -92,10 +93,10 @@ export default function AuthScreen({ onSignIn, onRegister }: AuthScreenProps) {
       <div className="w-full max-w-md">
         {/* Logo/Header */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-500 text-white text-2xl font-bold mb-4">
-            N
+          <div className="flex justify-center mb-6">
+            <img src={logo} alt="Nexa Logo" className="h-52 w-52 rounded-xl" />
           </div>
-          <h1 className="text-3xl font-bold text-neutral-900 mb-2">Welcome to Nexa</h1>
+          <h1 className="text-3xl font-bold text-neutral-900 mb-2">Welcome</h1>
           <p className="text-neutral-600 text-sm">
             {mode === 'login' 
               ? 'Sign in to continue your study journey' 
