@@ -40,6 +40,36 @@ import {
 } from "./services/matchmaking/services";
 
 
+// ---- Option loaders -------------------------------------------------
+type OptionRow = { id: number; name: string };
+async function fetchOptionNames(table: string, column = "name"): Promise<string[]> {
+  const { data, error } = await supabase.from(table).select(`${column}`).order(column, { ascending: true });
+  if (error) { console.error(`fetch ${table} failed`, error); return []; }
+  return (data as Record<string,string>[])?.map(r => r[column]) ?? [];
+}
+
+// Courses need course_name/course_code → show a nice label
+type CourseRow = { id: number; course_code: string | null; course_name: string | null };
+async function fetchCourseLabels(): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("courses")
+    .select("course_code, course_name")
+    .order("course_name", { ascending: true });
+  if (error) { console.error("fetch courses failed", error); return []; }
+  return (data as CourseRow[]).map(r =>
+    r.course_code ? `${r.course_name ?? r.course_code} (${r.course_code})` : (r.course_name ?? "")
+  ).filter(Boolean);
+}
+
+async function mapNamesToIds(table: string, names: string[]): Promise<number[]> {
+  if (!names.length) return [];
+  const { data, error } = await supabase.from(table).select("id, name").in("name", names);
+  if (error) { console.error(`map ${table} failed`, error); return []; }
+  // preserve selection order
+  const byName = new Map((data as OptionRow[]).map(r => [r.name, r.id]));
+  return names.map(n => byName.get(n)).filter((v): v is number => typeof v === "number");
+}
+
 export async function sendTestMessage(groupId: string) {
   const { data: s } = await supabase.auth.getSession();
   const myId = s?.session?.user?.id;
@@ -59,6 +89,7 @@ export async function sendTestMessage(groupId: string) {
 
 // Attach it to window so you can call it from the browser console
 ; (window as any).sendTestMessage = sendTestMessage;
+
 
 
 // ----------------------------------------------------------------------------
@@ -725,6 +756,50 @@ export default function App() {
     };
   }, []);
 
+const [onboardStartAt, setOnboardStartAt] = useState<number>(0);
+const [onboardInitial, setOnboardInitial] = useState<User | null>(null);
+
+  // Live dropdown options from DB
+const [uniOptions, setUniOptions] = useState<string[]>([]);
+const [courseOptions, setCourseOptions] = useState<string[]>([]);
+const [majorOptions, setMajorOptions] = useState<string[]>([]);
+const [goalOptions, setGoalOptions] = useState<string[]>([]);
+const [careerOptions, setCareerOptions] = useState<string[]>([]);
+const [hobbyOptions, setHobbyOptions] = useState<string[]>([]);
+const [countryOptions, setCountryOptions] = useState<string[]>([]);
+
+
+useEffect(() => {
+  (async () => {
+    const [
+      unis,
+      courses,
+      majors,
+      goals,
+      careers,
+      hobbies,
+      countries,
+    ] = await Promise.all([
+      fetchOptionNames("universities", "name"),
+      fetchCourseLabels(),
+      fetchOptionNames("major_options", "name"),
+      fetchOptionNames("academic_goals_options", "name"),
+      fetchOptionNames("career_options", "name"),
+      fetchOptionNames("hobby_options", "name"),
+      fetchOptionNames("country_options", "name"),
+    ]);
+
+    setUniOptions(unis);
+    setCourseOptions(courses);
+    setMajorOptions(majors);
+    setGoalOptions(goals);
+    setCareerOptions(careers);
+    setHobbyOptions(hobbies);
+    setCountryOptions(countries);
+
+  })();
+}, []);
+
   // 🔹 Local state
   const [tab, setTab] = useState("home");
   const [me, setMe] = useState(() => storage.get("nexa_me", DEFAULT_USER));
@@ -1292,7 +1367,24 @@ async function handleCancelRSVP(eventId: string) {
 
 
       {/* Onboarding overlay */}
-      {!onboarded && <Onboarding me={me} setMe={setMe} setOnboarded={setOnboarded} />}
+      {!onboarded && (
+          <Onboarding
+            me={me}
+            setMe={setMe}
+            setOnboarded={setOnboarded}
+            
+            initial={onboardInitial || me}
+            startAt={onboardStartAt}
+            // NEW: inject live options
+            uniOptions={uniOptions}
+            courseOptions={courseOptions}
+            majorOptions={majorOptions}
+            goalOptions={goalOptions}
+            careerOptions={careerOptions}
+            hobbyOptions={hobbyOptions}
+            countryOptions={countryOptions}
+          />
+        )}
     </div>
   );
 }
@@ -2614,7 +2706,7 @@ function ProfileScreen({ me, setMe, setOnboarded }: any) {
 // -----------------------------------------------------------------------------
 // Onboarding
 // -----------------------------------------------------------------------------
-function Onboarding({ me, setMe, setOnboarded }: any) {
+function Onboarding({ me, setMe, setOnboarded, uniOptions, courseOptions, majorOptions, goalOptions, careerOptions, hobbyOptions, countryOptions }: any) {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -2634,6 +2726,157 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
   }
 
   const [draft, setDraft] = useState<User>(me);
+  function formatYYYYMMDDToDDMMYYYY(s?: string | null) {
+  if (!s) return "";
+  const [y, m, d] = s.split("-");
+  return `${d}/${m}/${y}`;
+    }
+
+  function parseDDMMYYYYToYYYYMMDD(s?: string | null) {
+    if (!s) return null;
+    const [d, m, y] = s.split("/");
+    if (!d || !m || !y) return null;
+    return `${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`;
+  }
+
+    useEffect(() => {
+      let cancelled = false;
+
+      async function hydrateFromDB() {
+        try {
+          // Only bother on re-onboarding
+          const isRe = Boolean(
+            me?.firstName || me?.lastName || (me?.academicGoals?.length || 0) > 0
+          );
+
+          const { data: s } = await supabase.auth.getSession();
+          const uid = s?.session?.user?.id;
+          if (!uid) return;
+
+          // 1) users (simple fields)
+          const { data: uRows } = await supabase
+            .from("users")
+            .select("first_name,last_name,full_name,university,home_country,home_town,study_availability,preferred_study_style,preferred_group_size,dob,is_international")
+            .eq("id", uid)
+            .limit(1);
+          const u = (uRows && uRows[0]) || null;
+
+          // 2) join tables → ids
+          const [{ data: ugIds }, { data: ucIds }, { data: uhIds }] = await Promise.all([
+            supabase.from("user_academic_goals").select("goal_id").eq("user_id", uid),
+            supabase.from("user_career_aspirations").select("career_id").eq("user_id", uid),
+            supabase.from("user_hobbies").select("hobby_id").eq("user_id", uid),
+          ]);
+
+          // 3) map ids → names for dropdowns
+          const [goalNames, careerNames, hobbyNames] = await Promise.all([
+            (async () => {
+              const ids = (ugIds || []).map((r: any) => r.goal_id);
+              if (!ids.length) return [];
+              const { data } = await supabase
+                .from("academic_goals_options")
+                .select("name")
+                .in("id", ids);
+              return (data || []).map((r: any) => r.name);
+            })(),
+            (async () => {
+              const ids = (ucIds || []).map((r: any) => r.career_id);
+              if (!ids.length) return [];
+              const { data } = await supabase.from("career_options").select("name").in("id", ids);
+              return (data || []).map((r: any) => r.name);
+            })(),
+            (async () => {
+              const ids = (uhIds || []).map((r: any) => r.hobby_id);
+              if (!ids.length) return [];
+              const { data } = await supabase.from("hobby_options").select("name").in("id", ids);
+              return (data || []).map((r: any) => r.name);
+            })(),
+          ]);
+
+          // 4) course + major (take first if multiple)
+          const { data: userCourses } = await supabase
+            .from("user_courses")
+            .select("course_id, course_major")
+            .eq("user_id", uid)
+            .limit(1);
+          let courseLabel = "";
+          let majorText = "";
+          if (userCourses && userCourses[0]) {
+            majorText = userCourses[0].course_major || "";
+            const cid = userCourses[0].course_id;
+            if (cid) {
+              const { data: cRows } = await supabase
+                .from("courses")
+                .select("course_name,course_code")
+                .eq("id", cid)
+                .limit(1);
+              const c = (cRows && cRows[0]) || null;
+              if (c) {
+                courseLabel = c.course_code
+                  ? `${c.course_name ?? c.course_code} (${c.course_code})`
+                  : (c.course_name ?? "");
+              }
+            }
+          }
+
+          // 5) map numeric group size -> UI's string buckets
+          const groupSize = (() => {
+            const n = (u as any)?.preferred_group_size;
+            if (typeof n === "number") {
+              if (n <= 2) return "2";
+              if (n <= 4) return "3–4";
+              return "5+";
+            }
+            return me?.learning?.groupSize || "";
+          })();
+
+          // 6) apply to draft
+          if (!cancelled) {
+            const firstName =
+              (u as any)?.first_name ??
+              ((u as any)?.full_name ? String((u as any).full_name).split(" ")[0] : me.firstName);
+            const lastName =
+              (u as any)?.last_name ??
+              ((u as any)?.full_name
+                ? String((u as any).full_name).split(" ").slice(1).join(" ")
+                : me.lastName);
+
+            setDraft((d) => ({
+              ...d,
+              firstName,
+              lastName,
+              uni: (u as any)?.university ?? d.uni,
+              course: courseLabel || d.course,
+              major: majorText || d.major,
+              homeCountry: (u as any)?.home_country ?? d.homeCountry,
+              homeTown: (u as any)?.home_town ?? d.homeTown,
+              availability: Array.isArray((u as any)?.study_availability)
+                ? (u as any).study_availability
+                : d.availability,
+              learning: {
+                ...d.learning,
+                style: (u as any)?.preferred_study_style ?? d.learning?.style ?? "",
+                groupSize,
+                // frequency isn't in DB; keep whatever's in local state
+                frequency: d.learning?.frequency || "",
+              },
+              academicGoals: goalNames.length ? goalNames : d.academicGoals,
+              careerAspirations: careerNames.length ? careerNames : d.careerAspirations,
+              hobbies: hobbyNames.length ? hobbyNames : d.hobbies,
+              dob: (u as any)?.dob ? formatYYYYMMDDToDDMMYYYY((u as any).dob) : d.dob,
+              studentType: ((u as any)?.is_international ? "International" : "Local") as any,
+            }));
+          }
+        } catch (e) {
+          console.error("hydrateFromDB failed", e);
+        }
+      }
+
+      hydrateFromDB();
+      return () => {
+        cancelled = true;
+      };
+    }, []); // run once when the modal opens
 
   // Heuristic: if first/last name already exist, treat this pass as re-onboarding
   const isReOnboarding =
@@ -2700,21 +2943,21 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
         <div className="grid gap-3">
           <DropdownSelect
             label="University"
-            options={UNI_OPTIONS}
+            options={uniOptions}
             value={draft.uni}
             onChange={(v) => setDraft({ ...draft, uni: v })}
             placeholder="Search universities…"
           />
           <DropdownSelect
             label="Course"
-            options={COURSE_OPTIONS}
+            options={courseOptions}
             value={draft.course}
             onChange={(v) => setDraft({ ...draft, course: v })}
             placeholder="Search courses…"
           />
           <DropdownSelect
             label="Major"
-            options={MAJOR_OPTIONS}
+            options={majorOptions}
             value={draft.major || ""}
             onChange={(v) => setDraft({ ...draft, major: v })}
             placeholder="Search majors…"
@@ -2734,7 +2977,7 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
       content: (
         <DropdownMultiSelect
           label="Academic Goals"
-          options={ACADEMIC_GOAL_OPTIONS}
+          options={goalOptions}
           value={draft.academicGoals || []}
           onChange={(v) => setDraft({ ...draft, academicGoals: v })}
         />
@@ -2745,7 +2988,7 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
       content: (
         <DropdownMultiSelect
           label="Your career aspirations"
-          options={CAREER_ASPIRATION_OPTIONS}
+          options={careerOptions}
           value={draft.careerAspirations || []}
           onChange={(v) => setDraft({ ...draft, careerAspirations: v })}
         />
@@ -2756,7 +2999,7 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
       content: (
         <DropdownMultiSelect
           label="Hobbies"
-          options={HOBBY_OPTIONS}
+          options={hobbyOptions}
           value={draft.hobbies || []}
           onChange={(v) => setDraft({ ...draft, hobbies: v })}
           placeholder="Filter hobbies…"
@@ -2826,27 +3069,68 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
 
   // ---- Re-Onboarding (quick update) ----
   const stepsRe = [
+    // 1) About You (copied from stepsFull)
+    {
+      title: "About You",
+      content: (
+        <div className="grid grid-cols-2 gap-2">
+          <TextInput
+            autoFocus
+            label="First Name"
+            value={draft.firstName || ""}
+            onChange={(v: string) => setDraft({ ...draft, firstName: v })}
+            placeholder="e.g., Alex"
+          />
+          <TextInput
+            label="Last Name"
+            value={draft.lastName || ""}
+            onChange={(v: string) => setDraft({ ...draft, lastName: v })}
+            placeholder="e.g., Nguyen"
+          />
+          <TextInput
+            label="DOB (dd/MM/yyyy)"
+            value={draft.dob || ""}
+            onChange={(v: string) => setDraft({ ...draft, dob: v })}
+            placeholder="e.g., 09/04/2005"
+          />
+          <DropdownSelect
+            label="Home Country"
+            options={countryOptions}
+            value={draft.homeCountry || ""}
+            onChange={(v) => setDraft({ ...draft, homeCountry: v })}
+            placeholder="Search country…"
+          />
+          <TextInput
+            label="Home Town / City"
+            value={draft.homeTown || ""}
+            onChange={(v: string) => setDraft({ ...draft, homeTown: v })}
+            placeholder="e.g., Glen Waverley"
+          />
+        </div>
+      ),
+    },
+
     {
       title: "Education",
       content: (
         <div className="grid gap-3">
           <DropdownSelect
             label="University"
-            options={UNI_OPTIONS}
+            options={uniOptions}
             value={draft.uni}
             onChange={(v) => setDraft({ ...draft, uni: v })}
             placeholder="Search universities…"
           />
           <DropdownSelect
             label="Course"
-            options={COURSE_OPTIONS}
+            options={courseOptions}
             value={draft.course}
             onChange={(v) => setDraft({ ...draft, course: v })}
             placeholder="Search courses…"
           />
           <DropdownSelect
             label="Major"
-            options={MAJOR_OPTIONS}
+            options={majorOptions}
             value={draft.major || ""}
             onChange={(v) => setDraft({ ...draft, major: v })}
             placeholder="Search majors…"
@@ -2866,7 +3150,7 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
       content: (
         <DropdownMultiSelect
           label="Academic Goals"
-          options={ACADEMIC_GOAL_OPTIONS}
+          options={goalOptions}
           value={draft.academicGoals || []}
           onChange={(v) => setDraft({ ...draft, academicGoals: v })}
         />
@@ -2877,7 +3161,7 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
       content: (
         <DropdownMultiSelect
           label="Your career aspirations"
-          options={CAREER_ASPIRATION_OPTIONS}
+          options={careerOptions}
           value={draft.careerAspirations || []}
           onChange={(v) => setDraft({ ...draft, careerAspirations: v })}
         />
@@ -2888,7 +3172,7 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
       content: (
         <DropdownMultiSelect
           label="Hobbies"
-          options={HOBBY_OPTIONS}
+          options={hobbyOptions}
           value={draft.hobbies || []}
           onChange={(v) => setDraft({ ...draft, hobbies: v })}
           placeholder="Filter hobbies…"
@@ -3031,8 +3315,81 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
     }
   }
 
+async function saveOnboardingToDB(draft: any) {
+  const { data: s } = await supabase.auth.getSession();
+  const uid = s?.session?.user?.id;
+  if (!uid) return;
 
-  function next() {
+  // Helpers
+  const mapNamesToIds = async (table: string, names: string[]): Promise<number[]> => {
+    const lst = Array.isArray(names) ? names : [];
+    if (!lst.length) return [];
+    const { data, error } = await supabase
+      .from(table)
+      .select("id, name")
+      .in("name", lst);
+    if (error) { console.error(`map ${table} failed`, error); return []; }
+    const byName = new Map((data || []).map((r: any) => [r.name, r.id]));
+    return lst.map(n => byName.get(n)).filter((v): v is number => typeof v === "number");
+  };
+
+  // 1) Ensure the base user row exists FIRST (prevents 409 on RPCs)
+  await supabase.from("users").upsert({
+    id: uid,
+    university: draft.uni ?? null,
+    preferred_study_style: draft.learning?.style ?? null,
+    preferred_group_size: Number(draft.learning?.groupSize) || null,
+    study_availability: draft.availability ?? [],
+    full_name: draft.name ?? null,
+    home_country: draft.homeCountry ?? null,
+    home_town: draft.homeTown ?? null,
+    // also persist DOB + student type
+    dob: parseDDMMYYYYToYYYYMMDD(draft.dob),
+    is_international: draft.studentType === "International",
+  }, { onConflict: "id" });
+
+  // 2) Replace m2m tables (call even when empty to truly REPLACE)
+  const goalIds   = await mapNamesToIds("academic_goals_options", draft.academicGoals || []);
+  const careerIds = await mapNamesToIds("career_options",         draft.careerAspirations || []);
+  const hobbyIds  = await mapNamesToIds("hobby_options",          draft.hobbies || []);
+
+  const { error: eGoals } = await supabase.rpc("replace_user_academic_goals",     { p_user: uid, p_goal_ids: goalIds });
+  if (eGoals) console.error("replace_user_academic_goals failed", eGoals);
+
+  const { error: eCareer } = await supabase.rpc("replace_user_career_aspirations", { p_user: uid, p_career_ids: careerIds });
+  if (eCareer) console.error("replace_user_career_aspirations failed", eCareer);
+
+  const { error: eHobby } = await supabase.rpc("replace_user_hobbies",            { p_user: uid, p_hobby_ids: hobbyIds });
+  if (eHobby) console.error("replace_user_hobbies failed", eHobby);
+
+  // 3) Courses + Major
+  const { data: courseRows } = await supabase
+    .from("courses")
+    .select("id, course_name, course_code");
+
+  const labelFrom = (r: any) =>
+    r.course_code ? `${r.course_name ?? r.course_code} (${r.course_code})`
+                  : (r.course_name ?? "");
+
+  const courseIdByLabel = new Map((courseRows || []).map((r: any) => [labelFrom(r), r.id]));
+  const chosenCourseIds = (draft.courses || [draft.course])
+    .map((label: string) => courseIdByLabel.get(label))
+    .filter(Boolean) as number[];
+
+  const majorText = draft.major ?? null;
+
+  // Call replace even if empty to clear previous course selections
+  const { error: eCourses } = await supabase.rpc("replace_user_courses", {
+    p_user: uid,
+    p_course_ids: chosenCourseIds,
+    p_major: majorText,
+  });
+  if (eCourses) console.error("replace_user_courses failed", eCourses);
+}
+
+
+
+  async function next() {
     // Validate required fields for this step
     const currentTitle = steps[step].title;
     const validationError = validateStep(currentTitle, draft, isReOnboarding);
@@ -3050,6 +3407,8 @@ function Onboarding({ me, setMe, setOnboarded }: any) {
       }
     }
     if (isLast) {
+      await saveOnboardingToDB(draft);
+
       setMe(draft);
       setOnboarded(true);
     } else {
