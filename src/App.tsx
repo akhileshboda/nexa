@@ -816,7 +816,7 @@ function HomeScreen({ me, setTab, likes, topCandidate, onboarded, setOnboarded }
               <p className="mt-1 text-sm text-neutral-600">
                 {topCandidate ? (
                   <>
-                    "Hey, {topCandidate.profile.name} looks like a strong fit (score {topCandidate.score}). Want to start a chat?"
+                    "Hey, {topCandidate.profile.name} looks like a strong fit. Want to start a chat?"
                   </>
                 ) : (
                   <>You're all caught up! Explore events to meet more students.</>
@@ -835,16 +835,10 @@ function HomeScreen({ me, setTab, likes, topCandidate, onboarded, setOnboarded }
         </div>
 
         {/* Quick Stats */}
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3">
           <div className={cardBase}>
             <div className="text-xs text-neutral-500">Connections</div>
             <div className="mt-1 text-2xl font-semibold">{likes.length}</div>
-            <div className="mt-2 text-xs text-neutral-500">Liked profiles</div>
-          </div>
-          <div className={cardBase}>
-            <div className="text-xs text-neutral-500">Next Best Match</div>
-            <div className="mt-1 text-2xl font-semibold">{topCandidate ? topCandidate.score : "—"}</div>
-            <div className="mt-2 text-xs text-neutral-500">Rule‑based score</div>
           </div>
         </div>
 
@@ -872,8 +866,16 @@ function HeroCard({ me, onboarded, setOnboarded }: any) {
     <div className={cx(cardBase, "overflow-hidden p-0")}>
       <div className="relative">
         <div className="h-28 w-full bg-gradient-to-br from-indigo-500 to-cyan-500" />
-        <div className="absolute -bottom-7 left-4">
+        <div className="absolute -bottom-9 left-4 flex flex-col items-center">
           <Avatar name={me.name || "You"} size={64} seed={5} />
+          <button
+            type="button"
+            onClick={() => (window.location.href = "/settings/profile")}
+            className="mt-1 text-[11px] font-medium text-indigo-600 hover:underline focus:underline focus:outline-none"
+            aria-label="Edit profile photo"
+          >
+            Edit
+          </button>
         </div>
       </div>
       <div className="px-4 pb-4 pt-10">
@@ -913,7 +915,7 @@ function MatchScreen({ me, candidate, onLike, onSkip, likedUsers, suggestGroup }
         </div>
         {candidate ? (
           <div className="mt-3">
-            <ProfileCard profile={candidate.profile} score={candidate.score} />
+            <ProfileCard profile={candidate.profile} />
             <div className="mt-4 grid grid-cols-2 gap-3">
               <button className={cx(btnBase, "border bg-white")} onClick={onSkip}>
                 <X className="mr-2 h-4 w-4" /> Skip
@@ -969,7 +971,7 @@ function MatchScreen({ me, candidate, onLike, onSkip, likedUsers, suggestGroup }
   );
 }
 
-function ProfileCard({ profile, score }: any) {
+function ProfileCard({ profile, }: any) {
   return (
     <div className="rounded-xl border bg-white p-4">
       <div className="flex items-start gap-3">
@@ -977,7 +979,6 @@ function ProfileCard({ profile, score }: any) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between">
             <div className="truncate text-sm font-semibold">{profile.name}</div>
-            <span className="text-xs font-semibold text-indigo-600">Score {score}</span>
           </div>
           <div className="mt-0.5 text-xs text-neutral-600">
             <span className="inline-flex items-center gap-1"><GraduationCap className="h-3.5 w-3.5"/> {profile.course}</span>
