@@ -3621,61 +3621,84 @@ if (isLast) {
   const canProceed = !pendingError && dobFormatOk;
 
 
-  return (
-    <div
-      className="fixed inset-0 z-50 bg-black/50 backdrop-blur overflow-y-auto overscroll-contain"
-      onClick={() => setOnboarded(true)} // click outside to close
-      role="dialog"
-      aria-modal="true"
-    >
-      <div className="flex min-h-[100svh] items-center justify-center p-4">
-        <div
-          className="w-full max-w-md rounded-3xl bg-white p-6 max-h-[90vh] overflow-y-auto"
-          onClick={(e) => e.stopPropagation()} // prevent closing when clicking inside
-        >
-          <div className="mb-6 flex items-center justify-between">
-            <div>
-              <div className="text-lg font-semibold">{steps[step].title}</div>
-              <div className="text-xs text-neutral-500">Step {step + 1} of {steps.length}</div>
+return (
+  <div
+    className="fixed inset-0 z-50 bg-black/50 backdrop-blur overflow-y-auto overscroll-contain"
+    role="dialog"
+    aria-modal="true"
+  >
+    <div className="flex min-h-[100svh] items-center justify-center p-4">
+      <div
+        className="w-full max-w-md rounded-3xl bg-white p-6 max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <div className="text-lg font-semibold">{steps[step].title}</div>
+            <div className="text-xs text-neutral-500">
+              Step {step + 1} of {steps.length}
             </div>
+          </div>
+
+          {/* Right: step dots + close */}
+          <div className="flex items-center gap-2">
             <div className="flex gap-1">
               {steps.map((_, i) => (
-                <div key={i} className={cx("h-2 w-2 rounded-full", i <= step ? "bg-indigo-600" : "bg-neutral-200")} />
+                <div
+                  key={i}
+                  className={cx(
+                    "h-2 w-2 rounded-full",
+                    i <= step ? "bg-indigo-600" : "bg-neutral-200"
+                  )}
+                />
               ))}
             </div>
-          </div>
 
-          <div className="mb-6 overflow-y-auto max-h-[60svh] pr-1">
-            {steps[step].content}
-          </div>
-
-          {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
-
-          <div className="flex gap-3">
-            {step > 0 && (
-              <button
-                className={cx(btnBase, "border bg-white")}
-                onClick={() => setStep(step - 1)}
-              >
-                Back
-              </button>
-            )}
+            {/* Close (X) */}
             <button
-              className={cx(
-                btnBase,
-                "flex-1",
-                canProceed
-                  ? "bg-indigo-600 text-white"
-                  : "bg-neutral-300 text-neutral-500 cursor-not-allowed"
-              )}
-              onClick={next}
-              disabled={!canProceed}
+              type="button"
+              aria-label="Close onboarding"
+              title="Close"
+              className="ml-2 rounded-lg p-1 hover:bg-neutral-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              onClick={() => setOnboarded(true)}
             >
-              {isLast ? "Complete Setup" : "Next"}
+              <X className="h-5 w-5 text-neutral-500" aria-hidden="true" />
             </button>
           </div>
         </div>
+
+        <div className="mb-6 overflow-y-auto max-h-[60svh] pr-1">
+          {steps[step].content}
+        </div>
+
+        {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
+
+        <div className="flex gap-3">
+          {step > 0 && (
+            <button
+              className={cx(btnBase, "border bg-white")}
+              onClick={() => setStep(step - 1)}
+            >
+              Back
+            </button>
+          )}
+          <button
+            className={cx(
+              btnBase,
+              "flex-1",
+              canProceed
+                ? "bg-indigo-600 text-white"
+                : "bg-neutral-300 text-neutral-500 cursor-not-allowed"
+            )}
+            onClick={next}
+            disabled={!canProceed}
+          >
+            {isLast ? "Complete Setup" : "Next"}
+          </button>
+        </div>
       </div>
     </div>
-  );
+  </div>
+);
 }
