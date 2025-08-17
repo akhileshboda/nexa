@@ -3086,14 +3086,15 @@ function Onboarding({ me, setMe, setOnboarded, uniOptions, courseOptions, majorO
       title: "Home",
       content: (
         <div className="grid grid-cols-2 gap-2">
-          <TextInput
+          <DropdownSelect
             label="Home Country"
+            options={countryOptions}
             value={draft.homeCountry || ""}
             onChange={(v: string) => setDraft({ ...draft, homeCountry: v })}
             placeholder="e.g., Australia"
           />
           <TextInput
-            label="Home Town"
+            label="Home Town / City"
             value={draft.homeTown || ""}
             onChange={(v: string) => setDraft({ ...draft, homeTown: v })}
             placeholder="e.g., Melbourne"
