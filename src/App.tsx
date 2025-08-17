@@ -731,12 +731,122 @@ type ConversationSummary = {
   is_dm?: boolean | null;
 };
 
+// App.tsx (very top of file)
+export function formatYYYYMMDDToDDMMYYYY(iso?: string | null): string {
+  if (!iso) return "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return "";
+  const [, y, mo, d] = m;
+  return `${d}/${mo}/${y}`;
+}
 
+export function parseDDMMYYYYToYYYYMMDD(s?: string | null): string | null {
+  if (!s) return null;
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s.trim());
+  if (!m) return null;
+  const [, d, mo, y] = m;
+  return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
+}
 
 // -----------------------------------------------------------------------------
 // Main App
 // -----------------------------------------------------------------------------
 export default function App() {
+
+const [sessionUserId, setSessionUserId] = useState<string | null>(null);
+const prevUidRef = useRef<string | null>(null);
+
+
+
+useEffect(() => {
+  // Bootstrap once
+  supabase.auth.getSession().then(({ data }) => {
+    setSessionUserId(data.session?.user?.id ?? null);
+    setAuthed(!!data.session);
+    setCurrentEmail(data.session?.user?.email ?? "");
+  });
+
+  // React to every auth change
+  const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+    const uid = session?.user?.id ?? null;
+    setSessionUserId(uid);
+    setAuthed(!!session);
+    setCurrentEmail(session?.user?.email ?? "");
+  });
+
+  return () => sub.subscription.unsubscribe();
+}, []);
+
+useEffect(() => {
+  const uid = sessionUserId;
+
+  // user signed out → wipe in-memory state
+  if (!uid) {
+    setMe(DEFAULT_USER);
+    setOnboarded(false);
+    setLikes([]);
+    setSkips([]);
+    // optional: reset current tab/route to a safe default
+    // setTab("home");
+    prevUidRef.current = null;
+    return;
+  }
+
+  // if user actually changed, clear old in-memory state first
+  if (prevUidRef.current && prevUidRef.current !== uid) {
+    setMe(DEFAULT_USER);
+    setLikes([]);
+    setSkips([]);
+    // setTab("home");
+  }
+  prevUidRef.current = uid;
+
+  // load the profile for this uid
+  (async () => {
+    const { data: rows, error } = await supabase
+      .from("users")
+      .select(`
+        first_name,last_name,full_name,email,
+        university,preferred_study_style,preferred_group_size,
+        study_availability,home_country,home_town,dob,is_international,
+        onboarded_at
+      `)
+      .eq("id", uid)
+      .limit(1);
+
+    if (error) {
+      console.error("hydrate profile failed", error);
+      return;
+    }
+    const u = rows?.[0];
+
+    setMe({
+      id: uid,
+      name: [u?.first_name, u?.last_name].filter(Boolean).join(" ") || u?.full_name || "You",
+      firstName: u?.first_name ?? "",
+      lastName:  u?.last_name  ?? "",
+      uni: u?.university ?? "",
+      course: "",            // if you store course elsewhere, populate here
+      year: 1,
+      interests: [],
+      goals: [],
+      availability: u?.study_availability ?? [],
+      learning: {
+        style: u?.preferred_study_style ?? "",
+        groupSize: String(u?.preferred_group_size ?? ""),
+        frequency: "",
+      },
+      homeCountry: u?.home_country ?? "",
+      homeTown: u?.home_town ?? "",
+      dob: u?.dob ? formatYYYYMMDDToDDMMYYYY(u.dob) : "",
+      studentType: u?.is_international ? "International" : "Domestic",
+    });
+
+    setOnboarded(!!u?.onboarded_at); // ← drives whether onboarding modal shows
+  })();
+}, [sessionUserId]);
+
+
   // 🔹 Realtime messages debug subscription
   useEffect(() => {
     const channel = supabase
@@ -802,8 +912,10 @@ useEffect(() => {
 
   // 🔹 Local state
   const [tab, setTab] = useState("home");
-  const [me, setMe] = useState(() => storage.get("nexa_me", DEFAULT_USER));
-  const [onboarded, setOnboarded] = useState(() => storage.get("nexa_onboarded", false));
+  const [me, setMe]           = useState(DEFAULT_USER);
+  // null = loading; false = should show onboarding; true = hide
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
+
   const [likes, setLikes] = useState(() => storage.get("nexa_likes", []));
   const [skips, setSkips] = useState(() => storage.get("nexa_skips", []));
   const [filters, setFilters] = useState<string[]>([]); // event tags
@@ -865,17 +977,34 @@ async function confirmShare() {
   }
 }
 
-  // 🔹 Auth state
-  const [authed, setAuthed] = useState(() => storage.get("nexa_authed", false));
-  const [currentEmail, setCurrentEmail] = useState(() => storage.get("nexa_current_email", ""));
+useEffect(() => {
+  (async () => {
+    const { data: s } = await supabase.auth.getSession();
+    const uid = s?.session?.user?.id;
+    if (!uid) { setOnboarded(null); return; }
 
-  // 🔹 Persist state in local storage
-  useEffect(() => storage.set("nexa_authed", authed), [authed]);
-  useEffect(() => storage.set("nexa_current_email", currentEmail), [currentEmail]);
-  useEffect(() => storage.set("nexa_me", me), [me]);
-  useEffect(() => storage.set("nexa_onboarded", onboarded), [onboarded]);
-  useEffect(() => storage.set("nexa_likes", likes), [likes]);
-  useEffect(() => storage.set("nexa_skips", skips), [skips]);
+    // Read the flag from users.onboarded_at
+    const { data, error } = await supabase
+      .from("users")
+      .select("onboarded_at")
+      .eq("id", uid)
+      .single();
+
+    // If there is no row yet, create it so FKs will work later
+    if (error && (error as any).code === "PGRST116") {
+      await supabase.from("users").upsert({ id: uid }, { onConflict: "id" });
+      setOnboarded(false);        // first-time → show onboarding
+      return;
+    }
+
+    setOnboarded(Boolean(data?.onboarded_at));
+  })();
+}, []);
+
+  // 🔹 Auth state
+  const [authed, setAuthed]   = useState(false);
+  const [currentEmail, setCurrentEmail] = useState("");
+
 
   // Events
   // import the type EventUI (see fix #2)
@@ -942,13 +1071,6 @@ async function confirmShare() {
 }
 
 
-
-
-
-  // 🔹 User registry management
-  const getUsers = () => storage.get("nexa_users", []);
-  const setUsers = (arr: any[]) => storage.set("nexa_users", arr);
-
   // 🟢 Keep authed flag in sync with Supabase session
   useEffect(() => {
     // Check on load
@@ -986,9 +1108,55 @@ async function confirmShare() {
       await supabase
         .from("user_directory")
         .upsert({ user_id: user.id, email: user.email }, { onConflict: "user_id" });
+    
+      await supabase
+        .from("users")
+        .upsert(
+          {
+            id: user.id,
+            email: user.email ?? null,
+            // keep full_name for legacy fallbacks; first/last come from onboarding
+            full_name: user.user_metadata?.full_name ?? null,
+          },
+          { onConflict: "id" }
+        );
+
     }
     if (authed) upsertDirectory();
+    
   }, [authed]);
+
+    useEffect(() => {
+      if (!authed) return;
+
+      (async () => {
+        const { data: s } = await supabase.auth.getSession();
+        const uid = s?.session?.user?.id;
+        if (!uid) return;
+
+        const { data: u } = await supabase
+          .from("users")
+          .select("first_name, last_name, full_name, email")
+          .eq("id", uid)
+          .single();
+
+        if (!u) return;
+
+        setMe((m: any) => ({
+          ...m,
+          firstName: u.first_name ?? m.firstName ?? "",
+          lastName:  u.last_name  ?? m.lastName  ?? "",
+          // keep a sane fallback for legacy places still reading m.name
+          name:
+            [u.first_name, u.last_name].filter(Boolean).join(" ") ||
+            u.full_name ||
+            m.name ||
+            "Student",
+          // optional: also sync email into me if you show it anywhere
+          email: u.email ?? m.email ?? null,
+        }));
+      })();
+    }, [authed]);
 
 
 
@@ -1028,12 +1196,13 @@ async function confirmShare() {
   }
 
   // 🔹 Logout
-  async function handleLogout() {
-    await supabase.auth.signOut();
-    setAuthed(false);
-    setCurrentEmail("");
-    resetDemo();
-  }
+async function handleLogout() {
+  const { error } = await supabase.auth.signOut(); // optionally { scope: 'global' }
+  if (error) console.error('signOut failed', error);
+  // onAuthStateChange will fire with session=null; your existing effect
+  // should reset me/onboarded/likes/skips/etc. when uid becomes null.
+}
+
 
   async function handleRSVP(eventId: string) {
   const uid = await getMyUserId();
@@ -1121,18 +1290,6 @@ async function handleCancelRSVP(eventId: string) {
     return scored;
   }
 
-
-  function resetDemo() {
-    storage.del("nexa_me");
-    storage.del("nexa_onboarded");
-    storage.del("nexa_likes");
-    storage.del("nexa_skips");
-    setMe(DEFAULT_USER);
-    setOnboarded(false);
-    setLikes([]);
-    setSkips([]);
-    setTab("home");
-  }
 
   // 🟢 Show auth screen if not authenticated
   if (!authed) {
@@ -1367,7 +1524,7 @@ async function handleCancelRSVP(eventId: string) {
 
 
       {/* Onboarding overlay */}
-      {!onboarded && (
+      {onboarded === false && (
           <Onboarding
             me={me}
             setMe={setMe}
@@ -1647,12 +1804,16 @@ function HomeScreen({ me, setTab, likes, topCandidate, onboarded, setOnboarded }
 }
 
 function HeroCard({ me, onboarded, setOnboarded }: any) {
+  const displayName =
+    [me?.firstName, me?.lastName].filter(Boolean).join(" ") ||
+    me?.name || // fallback to legacy field
+    "Student";
   return (
     <div className={cx(cardBase, "overflow-hidden p-0")}>
       <div className="relative">
         <div className="h-28 w-full bg-gradient-to-br from-indigo-500 to-cyan-500" />
         <div className="absolute -bottom-9 left-4 flex flex-col items-center">
-          <Avatar name={me.name || "You"} size={64} seed={5} />
+          <Avatar name={displayName || "You"} size={64} seed={5} />
           <button
             type="button"
             onClick={() => (window.location.href = "/settings/profile")}
@@ -1667,7 +1828,7 @@ function HeroCard({ me, onboarded, setOnboarded }: any) {
         <div className="flex items-center justify-between">
           <div>
             <div className="text-sm text-neutral-500">Welcome</div>
-            <div className="text-lg font-semibold">{me.name || "Student"}</div>
+            <div className="text-lg font-semibold">{displayName}</div>
           </div>
           {!onboarded && (
             <button
@@ -2625,6 +2786,15 @@ function ProfileScreen({ me, setMe, setOnboarded }: any) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(me);
 
+  // Keep the local draft in sync if `me` changes (e.g., after re-onboarding)
+  useEffect(() => setDraft(me), [me]);
+
+  // Prefer DB-backed first/last; fall back to legacy `name`
+  const displayName =
+    [me?.firstName, me?.lastName].filter(Boolean).join(" ") ||
+    me?.name ||
+    "Student";
+
   function save() {
     setMe(draft);
     setEditing(false);
@@ -2634,9 +2804,9 @@ function ProfileScreen({ me, setMe, setOnboarded }: any) {
     <div className="space-y-4">
       <div className={cardBase}>
         <div className="flex items-start gap-3">
-          <Avatar name={me.name || "You"} size={56} seed={5} />
+          <Avatar name={displayName || "You"} size={56} seed={5} />
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-semibold">{me.name || "Student"}</div>
+            <div className="text-sm font-semibold">{displayName}</div>
             <div className="text-xs text-neutral-600">{me.course} • {me.uni}</div>
             <div className="mt-2 flex flex-wrap gap-2">
               {(me.goals || []).slice(0, 3).map((g: string) => (
@@ -2649,7 +2819,7 @@ function ProfileScreen({ me, setMe, setOnboarded }: any) {
           {!editing ? (
             <>
               <button className={cx(btnBase, "border bg-white")} onClick={() => setEditing(true)}>Edit</button>
-              <button className={cx(btnBase, "bg-neutral-900 text-white")} onClick={() => setOnboarded(false)}>Re‑onboard</button>
+              <button className={cx(btnBase, "bg-neutral-900 text-white")} onClick={() => setOnboarded(false)}>Re-onboard</button>
             </>
           ) : (
             <>
@@ -2664,10 +2834,14 @@ function ProfileScreen({ me, setMe, setOnboarded }: any) {
         <div className={cardBase}>
           <div className="text-sm font-semibold">Edit Basics</div>
           <div className="mt-3 grid grid-cols-1 gap-3">
+            {/* keep your single "Name" field if you want, or swap to separate first/last:
+            <TextInput label="First name" value={draft.firstName || ""} onChange={(v) => setDraft({ ...draft, firstName: v })} />
+            <TextInput label="Last name"  value={draft.lastName  || ""} onChange={(v) => setDraft({ ...draft, lastName: v })} />
+            */}
             <TextInput label="Name" value={draft.name} onChange={(v) => setDraft({ ...draft, name: v })} />
             <TextInput label="University" value={draft.uni} onChange={(v) => setDraft({ ...draft, uni: v })} />
             <TextInput label="Course" value={draft.course} onChange={(v) => setDraft({ ...draft, course: v })} />
-            <ChipsInput label="Goals" value={draft.goals} onChange={(v) => setDraft({ ...draft, goals: v })} placeholder="e.g., Front‑end dev role" />
+            <ChipsInput label="Goals" value={draft.goals} onChange={(v) => setDraft({ ...draft, goals: v })} placeholder="e.g., Front-end dev role" />
             <ChipsInput label="Interests" value={draft.interests} onChange={(v) => setDraft({ ...draft, interests: v })} placeholder="e.g., Cybersecurity, Basketball" />
             <ChipsInput label="Availability" value={draft.availability} onChange={(v) => setDraft({ ...draft, availability: v })} placeholder="e.g., Mon AM, Wed PM" />
             <div className="grid grid-cols-3 gap-2">
@@ -2703,6 +2877,7 @@ function ProfileScreen({ me, setMe, setOnboarded }: any) {
   );
 }
 
+
 // -----------------------------------------------------------------------------
 // Onboarding
 // -----------------------------------------------------------------------------
@@ -2726,18 +2901,7 @@ function Onboarding({ me, setMe, setOnboarded, uniOptions, courseOptions, majorO
   }
 
   const [draft, setDraft] = useState<User>(me);
-  function formatYYYYMMDDToDDMMYYYY(s?: string | null) {
-  if (!s) return "";
-  const [y, m, d] = s.split("-");
-  return `${d}/${m}/${y}`;
-    }
 
-  function parseDDMMYYYYToYYYYMMDD(s?: string | null) {
-    if (!s) return null;
-    const [d, m, y] = s.split("/");
-    if (!d || !m || !y) return null;
-    return `${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`;
-  }
 
     useEffect(() => {
       let cancelled = false;
@@ -3333,20 +3497,32 @@ async function saveOnboardingToDB(draft: any) {
     return lst.map(n => byName.get(n)).filter((v): v is number => typeof v === "number");
   };
 
-  // 1) Ensure the base user row exists FIRST (prevents 409 on RPCs)
-  await supabase.from("users").upsert({
-    id: uid,
-    university: draft.uni ?? null,
-    preferred_study_style: draft.learning?.style ?? null,
-    preferred_group_size: Number(draft.learning?.groupSize) || null,
-    study_availability: draft.availability ?? [],
-    full_name: draft.name ?? null,
-    home_country: draft.homeCountry ?? null,
-    home_town: draft.homeTown ?? null,
-    // also persist DOB + student type
-    dob: parseDDMMYYYYToYYYYMMDD(draft.dob),
-    is_international: draft.studentType === "International",
-  }, { onConflict: "id" });
+// Users simple profile columns (now includes first/last/email)
+const authEmail = s?.session?.user?.email ?? null;
+
+await supabase.from("users").upsert({
+  id: uid,
+
+  // 👇 add these:
+  first_name: draft.firstName?.trim() || null,
+  last_name:  draft.lastName?.trim()  || null,
+  full_name:
+    [draft.firstName, draft.lastName].filter(Boolean).join(" ")
+    || draft.name
+    || null,
+  email: authEmail,
+
+  // existing fields:
+  university: draft.uni ?? null,
+  preferred_study_style: draft.learning?.style ?? null,
+  preferred_group_size: Number(draft.learning?.groupSize) || null,
+  study_availability: draft.availability ?? [],
+  home_country: draft.homeCountry ?? null,
+  home_town: draft.homeTown ?? null,
+  dob: parseDDMMYYYYToYYYYMMDD(draft.dob),
+  is_international: draft.studentType === "International",
+}, { onConflict: "id" });
+
 
   // 2) Replace m2m tables (call even when empty to truly REPLACE)
   const goalIds   = await mapNamesToIds("academic_goals_options", draft.academicGoals || []);
@@ -3406,14 +3582,25 @@ async function saveOnboardingToDB(draft: any) {
         return; // stop progression
       }
     }
-    if (isLast) {
-      await saveOnboardingToDB(draft);
+if (isLast) {
+  await saveOnboardingToDB(draft);
 
-      setMe(draft);
-      setOnboarded(true);
-    } else {
-      setStep(step + 1);
-    }
+  // NEW: mark user as onboarded in DB
+  const { data: s } = await supabase.auth.getSession();
+  const uid = s?.session?.user?.id;
+  if (uid) {
+    await supabase
+      .from("users")
+      .update({ onboarded_at: new Date().toISOString() })
+      .eq("id", uid);
+  }
+
+  setMe(draft);
+  setOnboarded(true);
+} else {
+  setStep(step + 1);
+}
+
   }
 
   // Inline gating for the button state (visual UX)
