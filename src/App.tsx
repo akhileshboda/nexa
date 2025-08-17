@@ -79,7 +79,7 @@ export async function sendTestMessage(groupId: string) {
   }
 
   const { error } = await supabase.from("messages").insert({
-    conversationId: groupId,   // <- replace with a real group id
+    conversation_id: groupId,   // <- replace with a real group id
     sender_id: myId,     // must match your logged-in user
     text: "Hello from the app!"
   });
@@ -478,14 +478,17 @@ async function decorateConversations(convs: any[]) {
 
 type ConnectionProfile = { user_id: string; email: string | null; full_name?: string | null };
 
+// Keep or update this to return ONLY accepted connections
 async function listMyConnections(): Promise<ConnectionProfile[]> {
   const me = await getMyUserId();
   if (!me) return [];
 
   const { data: rows, error } = await supabase
     .from("connections")
-    .select("user_id, connection_id")
+    .select("user_id, connection_id, status")
+    .eq("status", "accepted")
     .or(`user_id.eq.${me},connection_id.eq.${me}`);
+
   if (error || !rows) return [];
 
   const otherIds = new Set<string>();
@@ -503,9 +506,28 @@ async function listMyConnections(): Promise<ConnectionProfile[]> {
   return (profiles || []).map(p => ({
     user_id: p.user_id,
     email: p.email ?? null,
-    full_name: (p as any).full_name ?? null, // optional column
+    full_name: (p as any).full_name ?? null,
   }));
 }
+
+// NEW: exact count of *accepted* connections for the signed-in user
+async function countMyConnections(): Promise<number> {
+  const me = await getMyUserId();
+  if (!me) return 0;
+
+  const { count, error } = await supabase
+    .from("connections")
+    .select("*", { count: "exact", head: true })
+    .eq("status", "accepted")
+    .or(`user_id.eq.${me},connection_id.eq.${me}`);
+
+  if (error) {
+    console.warn("countMyConnections error", error);
+    return 0;
+  }
+  return count ?? 0;
+}
+
 
 
 
@@ -753,8 +775,51 @@ export function parseDDMMYYYYToYYYYMMDD(s?: string | null): string | null {
 // -----------------------------------------------------------------------------
 export default function App() {
 
+  const [authed, setAuthed] = useState(false);
+  const [currentEmail, setCurrentEmail] = useState("");
+  
 const [sessionUserId, setSessionUserId] = useState<string | null>(null);
 const prevUidRef = useRef<string | null>(null);
+const [connectionCount, setConnectionCount] = useState(0);
+
+// add these
+const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+
+const openConversation = (id: string) => {
+  setActiveConversationId(id);
+  setTab("chat");          // navigate to the full-screen chat view
+};
+
+const openNewChat = () => setTab("newchat");   // navigate to New Chat picker
+const backToMessages = () => {                 // go back from Chat/NewChat
+  setActiveConversationId(null);
+  setTab("messages");
+};
+
+
+useEffect(() => {
+  let clean = () => {};
+  (async () => {
+    if (!authed) { setConnectionCount(0); return; }
+
+    // initial fetch
+    setConnectionCount(await countMyConnections());
+
+    // realtime: any change in connections triggers a recount
+    const channel = supabase
+      .channel("conn:all")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "connections" },
+        async () => setConnectionCount(await countMyConnections())
+      )
+      .subscribe();
+
+    clean = () => supabase.removeChannel(channel);
+  })();
+
+  return () => clean();
+}, [authed]);
 
 
 
@@ -1000,10 +1065,6 @@ useEffect(() => {
     setOnboarded(Boolean(data?.onboarded_at));
   })();
 }, []);
-
-  // 🔹 Auth state
-  const [authed, setAuthed]   = useState(false);
-  const [currentEmail, setCurrentEmail] = useState("");
 
 
   // Events
@@ -1336,6 +1397,8 @@ async function handleCancelRSVP(eventId: string) {
               topCandidate={topCandidate}
               onboarded={onboarded}
               setOnboarded={setOnboarded}
+              connectionsCount={connectionCount}
+              onStartChat={() => setTab("newchat")}
             />
           )}
           {tab === "matches" && (
@@ -1347,7 +1410,12 @@ async function handleCancelRSVP(eventId: string) {
             />
           )}
           {tab === "messages" && (
-            <MessagesScreen events={events} />
+            <MessagesScreen 
+            events={events} 
+            onOpenConversation={openConversation}  // NEW
+            onNewChat={openNewChat}                // NEW
+
+            />
           )}
           {tab === "events" && (
             <EventsScreen
@@ -1359,6 +1427,19 @@ async function handleCancelRSVP(eventId: string) {
               onCancelRSVP={handleCancelRSVP}
               onShareEvent={openShareModalForEvent}
 
+            />
+          )}
+          {tab === "newchat" && (
+            <NewChatScreen
+              onBack={backToMessages}
+              onOpenConversation={openConversation}
+            />
+          )}
+          {tab === "chat" && activeConversationId && (
+            <ChatView
+              conversationId={activeConversationId}
+              events={events}
+              onBack={backToMessages}
             />
           )}
           {tab === "profile" && (
@@ -1743,65 +1824,46 @@ function DropdownMultiSelect({
 
 
 
-function HomeScreen({ me, setTab, likes, topCandidate, onboarded, setOnboarded }: any) {
+function HomeScreen({
+  me,
+  setTab,
+  likes,
+  topCandidate,
+  onboarded,
+  setOnboarded,
+  connectionsCount,
+  onStartChat,
+}: any) {
   return (
     <div className="space-y-4">
       <HeroCard me={me} onboarded={onboarded} setOnboarded={setOnboarded} />
 
       <div className="grid grid-cols-1 gap-4">
-        {/* AI Suggestion */}
-        <div className={cardBase}>
-          <div className="flex items-start gap-3">
-            <Sparkles className="mt-0.5 h-5 w-5 text-indigo-600" />
-            <div>
-              <div className="text-sm font-semibold">Proactive Suggestion</div>
-              <p className="mt-1 text-sm text-neutral-600">
-                {topCandidate ? (
-                  <>
-                    "Hey, {topCandidate.profile.name} looks like a strong fit. Want to start a chat?"
-                  </>
-                ) : (
-                  <>You're all caught up! Explore events to meet more students.</>
-                )}
-              </p>
-              <div className="mt-3 flex gap-2">
-                <button className={cx(btnBase, "bg-neutral-900 text-white")} onClick={() => setTab("matches")}>
-                  Find Study Buddies
-                </button>
-                <button className={cx(btnBase, "border bg-white")} onClick={() => setTab("events")}>
-                  See Events
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        {/* AI Suggestion ... (unchanged) */}
 
         {/* Quick Stats */}
-        <div className="grid grid-cols-1 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <div className={cardBase}>
             <div className="text-xs text-neutral-500">Connections</div>
-            <div className="mt-1 text-2xl font-semibold">{likes.length}</div>
+            <div className="mt-1 text-2xl font-semibold">{connectionsCount}</div>
+          </div>
+          <div className={cardBase}>
+            <div className="text-xs text-neutral-500">Actions</div>
+            <button
+              className={cx(btnBase, "mt-2 bg-neutral-900 text-white")}
+              onClick={onStartChat}
+            >
+              Start a chat
+            </button>
           </div>
         </div>
 
-        {/* How it works */}
-        <div className={cardBase}>
-          <div className="flex items-start gap-3">
-            <Info className="mt-0.5 h-5 w-5" />
-            <div>
-              <div className="text-sm font-semibold">Designed for genuine connection</div>
-              <ul className="mt-2 list-disc pl-5 text-sm text-neutral-700">
-                <li>No public feeds or achievement flexing</li>
-                <li>Curated matches based on goals, interests, and availability</li>
-                <li>Groups of 3–4 for focused study and support</li>
-              </ul>
-            </div>
-          </div>
-        </div>
+        {/* How it works ... (unchanged) */}
       </div>
     </div>
   );
 }
+
 
 function HeroCard({ me, onboarded, setOnboarded }: any) {
   const displayName =
@@ -2166,7 +2228,15 @@ function CompactProfile({ p }: any) {
 
 // ---- Chat Screen (left: chat log, right: messages) ----
 
-function MessagesScreen({ events }: { events: EventUI[] }) {
+function MessagesScreen({ 
+  events,
+  onOpenConversation,
+  onNewChat,
+ }: { 
+    events: EventUI[]
+    onOpenConversation: (id: string) => void;
+    onNewChat: () => void;
+}) {
 
   // LEFT: chat log state
   const [conversations, setConversations] = useState<any[]>([]);
@@ -2242,18 +2312,13 @@ function MessagesScreen({ events }: { events: EventUI[] }) {
     return () => unsubRef.current?.();
   }, [selectedId]);
 
-  <ChatBox
-    conversationId={selectedId}
-    messages={thread}
-    events={events}                  // ✅ pass events here
-    onSend={(t, eventId) => sendMessage(selectedId!, t, eventId)}
-  />
   return (
     <div className="grid grid-rows-[auto,1fr] gap-4">
       {/* LEFT: Chat log */}
       <div className={`${ui.card} p-4`}>
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold">Chats</h3>
+          
           <button className={ui.button} onClick={refreshConversations}>Refresh</button>
         </div>
 
@@ -2280,8 +2345,7 @@ function MessagesScreen({ events }: { events: EventUI[] }) {
                 if (!dmSelection) return;
                 const cid = await openOrCreateDMByUserId(dmSelection);
                 if (!cid) return alert("Could not start DM.");
-                setSelectedId(cid);
-                refreshConversations();
+                onOpenConversation(cid);
               }}
             >
               DM
@@ -2309,7 +2373,7 @@ function MessagesScreen({ events }: { events: EventUI[] }) {
             return (
               <button
                 key={c.id}
-                onClick={() => setSelectedId(c.id)}
+                onClick={() => onOpenConversation(c.id)}
                 className={`${ui.listItem} ${active ? "ring-2 ring-indigo-100 bg-neutral-50" : ""}`}
               >
                 <div className={ui.badge}>
@@ -2402,6 +2466,170 @@ function MessagesScreen({ events }: { events: EventUI[] }) {
     </div>
   );
 }
+
+function NewChatScreen({
+  onBack,
+  onOpenConversation,
+}: {
+  onBack: () => void;
+  onOpenConversation: (conversationId: string) => void;
+}) {
+  const [connections, setConnections] = useState<ConnectionProfile[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [groupName, setGroupName] = useState("");
+
+  useEffect(() => { (async () => setConnections(await listMyConnections()))(); }, []);
+
+  const toggle = (id: string) =>
+    setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+
+  const startChat = async () => {
+    if (selected.length === 0) return;
+
+    // 1 person -> DM, >1 -> Group
+    if (selected.length === 1) {
+      const cid = await openOrCreateDMByUserId(selected[0]);
+      if (!cid) return alert("Could not start DM.");
+      onOpenConversation(cid);
+      return;
+    }
+
+    // group
+    const niceName =
+      groupName.trim() ||
+      `Study group (${selected.length})`;
+    const cid = await createGroupByUserIds(niceName, selected);
+    if (!cid) return alert("Could not create group.");
+    onOpenConversation(cid);
+  };
+
+  return (
+    <div className="min-h-[100dvh] bg-neutral-50">
+      {/* Top Bar */}
+      <div className="sticky top-0 z-10 flex items-center gap-2 border-b bg-white px-4 py-3">
+        <button className={cx(btnBase, "border bg-white")} onClick={onBack}>Back</button>
+        <div className="text-sm font-semibold">New Chat</div>
+        <div className="ml-auto text-xs text-neutral-500">{selected.length} selected</div>
+      </div>
+
+      <div className="mx-auto w-full max-w-md p-4">
+        {/* Optional group name (only shown when selecting >1) */}
+        {selected.length > 1 && (
+          <div className={`${cardBase} mb-3`}>
+            <div className="mb-1 text-xs font-medium text-neutral-700">Group name</div>
+            <input
+              className="w-full rounded-xl border px-3 py-2 text-sm"
+              value={groupName}
+              onChange={e => setGroupName(e.target.value)}
+              placeholder="e.g., FIT1008 Study Group"
+            />
+          </div>
+        )}
+
+        {/* Connections list */}
+        <div className={cardBase}>
+          <div className="mb-2 text-sm font-semibold">Your connections</div>
+          {connections.length === 0 ? (
+            <div className="text-sm text-neutral-600">No accepted connections yet.</div>
+          ) : (
+            <ul className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+              {connections.map(c => {
+                const id = c.user_id;
+                const checked = selected.includes(id);
+                const label = c.full_name || c.email || id;
+                return (
+                  <li key={id} className="flex items-center gap-3 rounded-xl border p-2">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={checked}
+                      onChange={() => toggle(id)}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm">{label}</div>
+                      <div className="truncate text-[11px] text-neutral-500">{id}</div>
+                    </div>
+                    <button
+                      className={cx(btnBase, "border bg-white text-xs")}
+                      onClick={async () => {
+                        // quick DM with just this one person
+                        const cid = await openOrCreateDMByUserId(id);
+                        if (!cid) return alert("Could not start DM.");
+                        onOpenConversation(cid);
+                      }}
+                    >
+                      DM
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          <div className="mt-3 flex gap-2">
+            <button className={cx(btnBase, "border bg-white")} onClick={onBack}>Cancel</button>
+            <button
+              className={cx(
+                btnBase,
+                selected.length === 0
+                  ? "bg-neutral-300 text-neutral-500 cursor-not-allowed"
+                  : "bg-neutral-900 text-white"
+              )}
+              disabled={selected.length === 0}
+              onClick={startChat}
+            >
+              {selected.length <= 1 ? "Start DM" : "Create Group"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatView({
+  conversationId,
+  events,
+  onBack,
+}: {
+  conversationId: string;
+  events: EventUI[];
+  onBack: () => void;
+}) {
+  const [thread, setThread] = useState<any[]>([]);
+  const unsubRef = useRef<null | (() => void)>(null);
+
+  useEffect(() => {
+    unsubRef.current?.();
+    (async () => {
+      setThread(await listMessages(conversationId));
+      unsubRef.current = subscribeToConversation(conversationId, (row) =>
+        setThread((prev) => [...prev, row])
+      );
+    })();
+    return () => unsubRef.current?.();
+  }, [conversationId]);
+
+  return (
+    <div className="min-h-[100dvh] bg-neutral-50">
+      <div className="sticky top-0 z-10 flex items-center gap-2 border-b bg-white px-4 py-3">
+        <button className={cx(btnBase, "border bg-white")} onClick={onBack}>Back</button>
+        <div className="text-sm font-semibold">Chat</div>
+      </div>
+
+      <div className="mx-auto w-full max-w-md p-4">
+        <ChatBox
+          conversationId={conversationId}
+          messages={thread}
+          events={events}
+          onSend={(t, eventId) => sendMessage(conversationId, t, eventId)}
+        />
+      </div>
+    </div>
+  );
+}
+
+
 
 function ChatBox({
   conversationId,
@@ -3028,7 +3256,7 @@ function Onboarding({ me, setMe, setOnboarded, uniOptions, courseOptions, majorO
               careerAspirations: careerNames.length ? careerNames : d.careerAspirations,
               hobbies: hobbyNames.length ? hobbyNames : d.hobbies,
               dob: (u as any)?.dob ? formatYYYYMMDDToDDMMYYYY((u as any).dob) : d.dob,
-              studentType: ((u as any)?.is_international ? "International" : "Local") as any,
+              studentType: ((u as any)?.is_international ? "International" : "Domestic") as any,
             }));
           }
         } catch (e) {
